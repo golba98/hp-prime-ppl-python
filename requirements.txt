@@ -1,0 +1,5 @@
+# Core Dependencies
+Pillow==12.1.1
+
+# Development/Testing
+pytest==8.1.1

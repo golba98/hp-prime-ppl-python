@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+env/
+venv/
+ENV/
+
+# Project Specific
+screen.png
+screen_tree.png
+*.expected_actual
+*.diff
+
+# Binaries
+*.exe
+*.dll
+*.so
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
