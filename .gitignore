@@ -9,6 +9,7 @@ venv/
 ENV/
 
 # Project Specific
+GEMINI.md
 screen.png
 screen_tree.png
 *.expected_actual
