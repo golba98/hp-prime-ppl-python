@@ -1,0 +1,11 @@
+
+Found 1 PPL program(s)
+------------------------------------------------------------
+  FAIL  examples/FIREWORKS.hpprgm
+        SyntaxError: unterminated string literal (detected at line 139) (FIREWORKS.hpprgm, line 139)
+------------------------------------------------------------
+
+0 passed,  1 failed  out of 1 total
+
+Failed programs:
+  examples/FIREWORKS.hpprgm:  unterminated string literal (detected at line 139) (FIREWORKS.hpprgm, line 139)

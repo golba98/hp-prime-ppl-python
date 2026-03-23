@@ -17,16 +17,17 @@ import re
 
 # Force UTF-8 output so Unicode characters in error messages display correctly
 if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # type: ignore
 if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')  # type: ignore
 
-# ── Ensure 0-App is on sys.path ──────────────────────────────────
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
+# ── Ensure 0-App root is on sys.path (works both as script and -m module) ──
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # .../src/ppl_emulator
+_APP_ROOT   = os.path.dirname(os.path.dirname(_SCRIPT_DIR)) # .../0-App
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
 
-from lint import lint
+from src.ppl_emulator.linter import lint  # pyre-ignore
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ def _color_enabled():
     if os.name == 'nt':
         # Standard way to enable ANSI on Windows 10+
         import ctypes
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore
         # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
     return True
@@ -264,7 +265,7 @@ Examples:
             sys.exit(1)   # stop here — don't run broken code
 
     # ── Stage 2: Transpile ───────────────────────────────────────
-    from transpiler import transpile
+    from src.ppl_emulator.transpiler.core import transpile  # pyre-ignore
     try:
         python_code = transpile(ppl_code, out_path=args.output)
     except Exception as e:

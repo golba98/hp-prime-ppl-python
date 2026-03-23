@@ -12,13 +12,13 @@ Each test writes PPL code, transpiles it, executes it, and checks:
 """
 
 import sys, os, io, math, contextlib, tempfile
-import pytest
+import pytest  # pyre-ignore
 
 # Ensure project dir is on path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from transpiler import transpile
-from runtime import HPPrimeRuntime, PPLList
+from src.ppl_emulator.transpiler import transpile  # pyre-ignore
+from src.ppl_emulator.runtime import HPPrimeRuntime, PPLList  # pyre-ignore
 
 
 # ── Helper ────────────────────────────────────────────────────────
@@ -379,7 +379,7 @@ class TestGraphics:
         """
         _, rt, _ = run_ppl(code)
         # Center pixel should be white
-        px = rt.img.getpixel((160, 120))
+        px = rt.img.getpixel((160, 120))  # pyre-ignore
         assert px == (255, 255, 255)
 
     def test_pixon(self):
@@ -392,7 +392,7 @@ class TestGraphics:
         END;
         """
         _, rt, _ = run_ppl(code)
-        px = rt.img.getpixel((50, 50))
+        px = rt.img.getpixel((50, 50))  # pyre-ignore
         assert px == (255, 0, 0)
 
     def test_line(self):
@@ -406,10 +406,10 @@ class TestGraphics:
         """
         _, rt, _ = run_ppl(code)
         # Pixel on the line should be black
-        px = rt.img.getpixel((50, 0))
+        px = rt.img.getpixel((50, 0))  # pyre-ignore
         assert px == (0, 0, 0)
         # Pixel off the line should be white
-        px2 = rt.img.getpixel((50, 50))
+        px2 = rt.img.getpixel((50, 50))  # pyre-ignore
         assert px2 == (255, 255, 255)
 
     def test_filled_rect(self):
@@ -422,7 +422,7 @@ class TestGraphics:
         END;
         """
         _, rt, _ = run_ppl(code)
-        px = rt.img.getpixel((30, 30))
+        px = rt.img.getpixel((30, 30))  # pyre-ignore
         assert px == (0, 0, 255)
 
     def test_textout(self):
@@ -436,7 +436,7 @@ class TestGraphics:
         """
         _, rt, _ = run_ppl(code)
         # Just verify it didn't crash and screen exists
-        assert rt.img.size == (320, 240)
+        assert rt.img.size == (320, 240)  # pyre-ignore
 
     def test_circle(self):
         """FILLCIRCLE_P should fill pixels."""
@@ -449,7 +449,7 @@ class TestGraphics:
         """
         _, rt, _ = run_ppl(code)
         # Center of circle should be red
-        px = rt.img.getpixel((100, 100))
+        px = rt.img.getpixel((100, 100))  # pyre-ignore
         assert px == (255, 0, 0)
 
 

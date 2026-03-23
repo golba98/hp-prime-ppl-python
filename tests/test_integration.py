@@ -23,14 +23,15 @@ Expected-output assertions:
 """
 
 import sys, os, io, contextlib, tempfile, glob
-import pytest
+import pytest  # pyre-ignore
 
 # Ensure 0-App is on the path so all modules are importable
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
-from transpiler import transpile
-from lint        import lint, lint_summary
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.ppl_emulator.transpiler import transpile  # pyre-ignore
+from src.ppl_emulator.linter import lint, lint_summary  # pyre-ignore
 
 # ── Discover all .hpprgm files ────────────────────────────────────────────────
 

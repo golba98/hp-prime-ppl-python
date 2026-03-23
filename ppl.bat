@@ -3,4 +3,4 @@
 :: Usage: ppl BSTVisualizer.hpprgm
 :: Usage: ppl BSTVisualizer.hpprgm --dump-python
 :: Usage: ppl BSTVisualizer.hpprgm --output myscreen.png
-py "%~dp0run_ppl.py" %*
+py "%~dp0src\ppl_emulator\cli.py" %*
