@@ -12,6 +12,7 @@ class HPPrimeRuntime:
         self.img    = Image.new('RGB', (self.width, self.height), (255, 255, 255))
         self.draw   = ImageDraw.Draw(self.img)
         self._getkey_calls = 0
+        self._input_cancelled = 0
         self.CAS    = CASMock()
 
     # ── I/O ──────────────────────────────────────────────────────
@@ -23,6 +24,7 @@ class HPPrimeRuntime:
         print(f"[MSGBOX] {msg}")
 
     def INPUT(self, vars_spec, title="", labels=None, help_text=None):
+        self._input_cancelled += 1
         print(f"[INPUT] headless — cancelled")
         return 0
 
@@ -48,7 +50,7 @@ class HPPrimeRuntime:
 
     def DIM(self, obj): return self.SIZE(obj)
 
-    def MOUSE(self): return PPLList([-1, -1, 0, 0, 0])
+    def MOUSE(self, idx=0): return PPLList([-1, -1, 0, 0, 0])
 
     # ── Graphics ─────────────────────────────────────────────────
 
@@ -99,8 +101,8 @@ class HPPrimeRuntime:
     def IP(self, x): return int(x)
     def FP(self, x): return x - int(x)
     def ABS(self, x): return abs(x)
-    def MAX(self, a, b): return max(a, b)
-    def MIN(self, a, b): return min(a, b)
+    def MAX(self, *args): return max(args)
+    def MIN(self, *args): return min(args)
     def FLOOR(self, x): return math.floor(x)
     def CEILING(self, x): return math.ceil(x)
     def ROUND(self, x, n=0): return round(x, n)
@@ -149,6 +151,10 @@ class HPPrimeRuntime:
     def BITOR(self, a, b): return int(a) | int(b)
     def BITXOR(self, a, b): return int(a) ^ int(b)
     def BITNOT(self, a): return ~int(a)
+
+    # HP Prime: Binary<->Real conversions
+    def B_to_R(self, x): return int(x)
+    def R_to_B(self, x, bits=32, digits=4): return int(round(float(x)))
 
     def REPLACE(self, obj, start_or_old, length_or_new, replacement=None):
         if replacement is None:

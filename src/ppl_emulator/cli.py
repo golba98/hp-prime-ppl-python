@@ -145,24 +145,8 @@ def _show_issue(filename: str, lines: list, issue) -> None:
     loc_info = f'{short_path}:{ln}' if ln > 0 else short_path
     print(f'     {_CLR_BLU}-->{_CLR_RST} {_CLR_GRY}{loc_info}{_CLR_RST}')
 
-    # Source snippet
-    if 0 < ln <= len(lines):
-        src = lines[ln - 1].rstrip()
-        col = _find_col(src, msg)
-
-        # Line display:  12 |  EXPORT foo(a, b)
-        gutter = f'{_CLR_BLU}      |{_CLR_RST}'
-        print(gutter)
-        print(f'{_CLR_BLU}{ln:>5} |{_CLR_RST} {src}')
-
-        # Pointer row:      |         ^
-        if col >= 0:
-            pointer = ' ' * col + '^'
-        else:
-            stripped = src.lstrip()
-            lead     = len(src) - len(stripped)
-            pointer  = ' ' * lead + '~' * max(1, len(stripped))
-        print(f'{_CLR_BLU}      |{_CLR_RST} {color}{_CLR_BLD}{pointer}{_CLR_RST}')
+    # Source snippet removed as per request ("remove the line results")
+    pass
 
     print()
 
@@ -211,6 +195,56 @@ def _show_runtime_error(filename: str, exc: Exception, py_code: str) -> None:
     _divider()
 
 
+
+# ─────────────────────────────────────────────────────────────────
+#  PPL language detection (for .txt files)
+# ─────────────────────────────────────────────────────────────────
+
+def _looks_like_ppl(code: str) -> bool:
+    """
+    Score a text file to decide if it contains HP Prime PPL code.
+    Returns True if the score is high enough to be confident.
+    """
+    # Normalise for matching (upper-case copy, keep original for neg checks)
+    up = code.upper()
+
+    score = 0
+
+    # ── Strong PPL indicators ─────────────────────────────────────
+    # EXPORT FuncName() BEGIN  — the canonical PPL function header
+    if re.search(r'EXPORT\s+\w+\s*\(', up):                 score += 4
+    # HP Prime pragma header
+    if '#PRAGMA MODE(' in up:                                    score += 4
+    # := assignment  (Pascal/PPL, not Python/JS/C)
+    if ':=' in code:                                             score += 3
+    # BEGIN / END block structure
+    if re.search(r'\bBEGIN\b', up):                            score += 2
+    if re.search(r'\bEND;', up):                                score += 2
+    # PPL-specific keywords
+    for kw in ('LOCAL ', 'IFERR ', 'THEN\n', 'THEN ', 'UNTIL '):
+        if kw in up:                                             score += 1
+    # Common PPL built-ins unlikely to appear in other languages
+    for fn in ('PRINT(', 'MSGBOX(', 'RECT(', 'PIXON(', 'DISP(', 'WAIT(', 'MAKELIST('):
+        if fn in up:                                             score += 1
+
+    # ── Negative indicators — other languages ────────────────────
+    lines = code.splitlines()
+    for line in lines[:40]:              # only check the top of the file
+        s = line.strip()
+        if s.startswith('def ')    or s.startswith('import ') or s.startswith('from '):
+            score -= 3               # Python
+        if s.startswith('#include') or s.startswith('int main'):
+            score -= 3               # C / C++
+        if s.startswith('function ') or s.startswith('const ') or s.startswith('let ') or s.startswith('var '):
+            score -= 3               # JavaScript / TypeScript
+        if s.startswith('public ') or s.startswith('private ') or s.startswith('class '):
+            score -= 3               # Java / C#
+        if s.startswith('fn ') or s.startswith('use ') or s.startswith('mod '):
+            score -= 3               # Rust
+
+    return score >= 5
+
+
 # ─────────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────────
@@ -227,7 +261,7 @@ Examples:
   ppl BSTVisualizer.hpprgm --dump-python
         """
     )
-    parser.add_argument('file',            nargs='?',            help='PPL source file (.hpprgm)')
+    parser.add_argument('file',            nargs='?',            help='PPL source file (.hpprgm or .txt)')
     parser.add_argument('--code',  '-c',                         help='Inline PPL code string')
     parser.add_argument('--output','-o',   default='screen.png', help='Output PNG path (default: screen.png)')
     parser.add_argument('--dump-python',   action='store_true',  help='Print transpiled Python to stderr')
@@ -252,6 +286,13 @@ Examples:
     if not ppl_code.strip():
         print(f'  {_CLR_RED}{_CLR_BLD}error:{_CLR_RST} No PPL code provided.')
         sys.exit(1)
+
+    # ── .txt files: verify the content is actually PPL ───────────
+    if args.file and os.path.splitext(args.file)[1].lower() == '.txt':
+        if not _looks_like_ppl(ppl_code):
+            print(f'  {_CLR_RED}{_CLR_BLD}error:{_CLR_RST} {_CLR_BLD}{args.file}{_CLR_RST} does not appear to be PPL code.')
+            print(f'  {_CLR_GRY}Hint: PPL files should contain EXPORT functions with BEGIN/END blocks and := assignments.{_CLR_RST}')
+            sys.exit(1)
 
     # ── Stage 1: Lint ────────────────────────────────────────────
     if not args.no_lint:
@@ -294,7 +335,10 @@ Examples:
         _divider()
         print()
         exec(compile(python_code, '<ppl_transpiled>', 'exec'), ns)
-    except SystemExit:
+        rt = ns.get('_rt')
+        if rt and getattr(rt, '_input_cancelled', 0) > 0:
+            n = rt._input_cancelled
+            print(f"\n  {_CLR_YEL}note:{_CLR_RST} {n} INPUT call(s) were cancelled (headless mode). Results may be empty or default.")
         pass
     except KeyboardInterrupt:
         print(f"\n  {_CLR_YEL}{_CLR_BLD}[STOPPED]{_CLR_RST}  Execution interrupted by user.")

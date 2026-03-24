@@ -13,6 +13,7 @@ _OPS = [
     (r'≤',        '<='),
     (r'≥',        '>='),
     (r'<>',       '!='),
+    (r'(?<![<>!:=])=(?![=>])', '=='),  # PPL = is equality (not assignment)
 ]
 
 _PYTHON_RESERVED = frozenset({'set', 'list', 'map', 'filter', 'input', 'type', 'dir', 'id', 'hex', 'oct', 'bin', 'str'})

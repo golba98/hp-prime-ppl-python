@@ -121,6 +121,14 @@ def _xform(expr):
                 return _safe_name(name) + "(" + m.group(2) + ")"
             e = re.sub(r'\b([A-Za-z_]\w*)\s*\(([^()]+)\)', repl_paren_idx, e)
             
+            # HP Prime Unicode-arrow function names: B→R, R→B, etc.
+            e = re.sub(r'([A-Za-z_]\w*)→([A-Za-z_]\w*)', r'\1_to_\2', e)
+            # HP Prime native math symbols
+            e = e.replace('\u2212', '-')          # − (U+2212) Unicode minus → ASCII minus
+            e = e.replace('\u03c0', 'pi')          # π (U+03C0) pi constant
+            e = e.replace('\u03A0', 'pi')          # Π uppercase variant
+            e = re.sub(r'\u221a([\w.]+)', r'SQRT(\1)', e)   # √x  → SQRT(x)
+            e = re.sub(r'\u221a(\([^()]*\))', r'SQRT\1', e) # √(x) → SQRT(x)
             # Ops
             for pat, rep in _OPS: e = re.sub(pat, rep, e, flags=re.IGNORECASE)
             e = re.sub(r'(?<!\*)\^(?!\*)', '**', e)

@@ -10,6 +10,7 @@ ENV/
 
 # Project Specific
 GEMINI.md
+CLAUDE.md
 screen.png
 screen_tree.png
 *.expected_actual

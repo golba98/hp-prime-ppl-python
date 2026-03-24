@@ -38,7 +38,7 @@ import re
 import sys
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Set, Tuple, Any
+from typing import List, Dict, Set, Optional, Tuple, Any, cast
 
 # ── Ensure 0-App root is on sys.path (works both as script and -m module) ──
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # .../src/ppl_emulator
@@ -59,7 +59,7 @@ BUILTIN_ARGS = {
     'WAIT': (0, 1),
     'GETKEY': (0, 0),
     'ISKEYDOWN': (1, 1),
-    'MOUSE': (0, 0),
+    'MOUSE': (0, 1),
     'DISP_FREEZE': (0, 0),
     'FREEZE': (0, 0),
     # Graphics
@@ -75,7 +75,7 @@ BUILTIN_ARGS = {
     'TEXTOUT_P': (3, 7),
     'DRAWMENU': (0, 6),
     'BLIT': (3, 10),
-    'BLIT_P': (0, 10),
+    'BLIT_P': (0, 11),
     'SUBGROB': (5, 6),
     'INVERT_P': (0, 5),
     'GROB': (3, 4),
@@ -84,7 +84,7 @@ BUILTIN_ARGS = {
     'IP': (1, 1),
     'FP': (1, 1),
     'ABS': (1, 1),
-    'MAX': (2, 2), 'MIN': (2, 2), 'FLOOR': (1, 1), 'CEILING': (1, 1), 'ROUND': (2, 2),
+    'MAX': (1, 100), 'MIN': (1, 100), 'FLOOR': (1, 1), 'CEILING': (1, 1), 'ROUND': (2, 2),
     'SQ': (1, 1), 'SQRT': (1, 1), 'LOG': (1, 1), 'LN': (1, 1), 'EXP': (1, 1),
     'SIN': (1, 1), 'COS': (1, 1), 'TAN': (1, 1), 'ASIN': (1, 1), 'ACOS': (1, 1),
     'ATAN': (1, 1), 'IFTE': (3, 3), 'EXPR': (1, 1),
@@ -116,6 +116,27 @@ _STRUCTURAL: frozenset = frozenset([
     'LOCAL', 'BEGIN', 'EXPORT', 'PROCEDURE',
     'AND', 'OR', 'NOT', 'MOD', 'DIV', 'XOR',
     'CASE', 'DEFAULT'
+])
+
+# PPL-specific Unicode operators that are valid on HP Prime (not ASCII errors)
+_PPL_UNICODE_OPS: frozenset = frozenset([
+    '≠',  # not-equal (≠)
+    '≤',  # less-or-equal (≤)
+    '≥',  # greater-or-equal (≥)
+    '▶',  # STO store (▶)
+    '→',  # right-arrow (→)
+    '←',  # left-arrow (←)
+    '∞',  # infinity (∞)
+    '≡',  # identical-to (≡)
+    '−',  # Unicode minus sign (U+2212) — used on HP Prime keyboard
+    'π',  # pi constant (U+03C0) — native HP Prime symbol
+    '√',  # square root (U+221A) — native HP Prime operator
+    '∑',  # summation (U+2211)
+    '∫',  # integral (U+222B)
+    '∂',  # partial derivative (U+2202)
+    'θ',  # theta (U+03B8)
+    'ℯ',  # euler's number (U+212F)
+    'ⅈ',  # imaginary unit (U+2148)
 ])
 
 # Reserved global variables (A-Z, G0-G9, L0-L9, M0-M9)
@@ -176,8 +197,7 @@ class Issue:
         
         prefix = f'  {color}{_CLR_BLD}[{tag}]{_CLR_RST}  '
         loc    = f'{_CLR_GRY}line {self.line_no:>4}{_CLR_RST}'
-        detail = f' {_CLR_CYN}|{_CLR_RST} {self.text}' if self.text else ''
-        return f'{prefix} [{loc}]  {_CLR_BLD}{self.message}{_CLR_RST}{detail}'
+        return f'{prefix} [{loc}]  {_CLR_BLD}{self.message}{_CLR_RST}'
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -200,23 +220,53 @@ def _strip_comment(line: str) -> str:
 
 def _erase_strings(line: str) -> str:
     """Replace the *contents* of string literals with spaces so regex
-    patterns never match text inside quotes."""
-    result, in_str, buf = [], False, []
-    for ch in line:
+    patterns never match text inside quotes. Handles PPL escaped quotes ("") 
+    and backslash-escaped quotes (\\")."""
+    result, in_str = [], False
+    i = 0
+    while i < len(line):
+        ch = line[i]
         if ch == '"':
             if in_str:
-                result.append('"' + ' ' * len(buf) + '"')
-                buf = []
-            in_str = not in_str
+                # Check for escaped quote ""
+                if i + 1 < len(line) and line[i+1] == '"':
+                    result.append('  ') # Two spaces for ""
+                    i += 1
+                else:
+                    in_str = False
+                    result.append('"')
+            else:
+                in_str = True
+                result.append('"')
         elif in_str:
-            buf.append(ch)
+            if ch == '\\' and i + 1 < len(line) and line[i+1] == '"':
+                result.append('  ') # Two spaces for \"
+                i += 1
+            else:
+                result.append(' ')
         else:
             result.append(ch)
+        i += 1
     return ''.join(result)
 
 
 def _has_odd_quotes(line: str) -> bool:
-    return line.count('"') % 2 != 0
+    """Check if a line has an unclosed string literal, respecting escaped quotes ("" and \\")."""
+    in_str = False
+    i = 0
+    while i < len(line):
+        if line[i] == '"':
+            if in_str:
+                if i + 1 < len(line) and line[i+1] == '"':
+                    i += 1 # skip escaped quote ""
+                else:
+                    in_str = False
+            else:
+                in_str = True
+        elif in_str and line[i] == '\\' and i + 1 < len(line) and line[i+1] == '"':
+            i += 1 # skip escaped quote \"
+        i += 1
+    return in_str
 
 
 def _paren_balance(line: str) -> int:
@@ -231,24 +281,47 @@ def _brace_balance(line: str) -> int:
     return safe.count('{') - safe.count('}')
 
 
-def _is_valid_lhs(expr: str) -> bool:
+def _is_valid_lhs(expr: str, line_no: int, issues: List[Issue], source_line: str) -> bool:
     """Return True if expr is a valid assignment target in PPL.
     Valid:  identifier          e.g.  x
     Valid:  LOCAL identifier    e.g.  LOCAL x
     Valid:  identifier[index]   e.g.  bst_val[slot]  (list element)
+    Valid:  comma-separated list e.g. x, y, z (for LOCAL)
     Invalid: literals, expressions, keywords, or using () for indexing."""
     expr = expr.strip()
     
     # Strip LOCAL prefix if present
     if expr.upper().startswith("LOCAL "):
-        expr = expr[6:].strip()  # pyre-ignore
+        expr = str(expr[6:]).strip()
 
-    # Plain identifier
+    # 1. Simple identifier
     if re.match(r'^[A-Za-z_]\w*$', expr):
+        if expr.upper() in _STRUCTURAL:
+             issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — "{expr}" is a reserved keyword.', source_line))
+             return False
         return True
-    # List element: name[expr] or name(expr) (can be nested/multi-dim)
-    if re.match(r'^[A-Za-z_]\w*\s*[\[\(].*[\]\)]$', expr):
+    
+    # 2. List element:  name(index) or name[index]
+    # PPL uses (index) for both functions and lists, but [] is also seen.
+    m_list = re.match(r'^([A-Za-z_]\w*)\s*[\(\[](.+)[\)\]]$', expr)
+    if m_list:
+        name = m_list.group(1).upper()
+        if name in _STRUCTURAL:
+            issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — "{name}" is a reserved keyword.', source_line))
+            return False
         return True
+
+    # 3. Multiple variables in LOCAL (e.g., LOCAL a, b, c)
+    # Only reached when expr has commas but no surrounding parens/brackets
+    if ',' in expr:
+        parts = [p.strip() for p in expr.split(',')]
+        return all(_is_valid_lhs(p, line_no, issues, source_line) for p in parts)
+    # 4. Handle cases where it's a function call on the LHS (invalid)
+    if '(' in expr:
+        issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — cannot assign to a function result.', source_line))
+        return False
+
+    issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — must be a variable or list element.', source_line))
     return False
 
 
@@ -273,18 +346,11 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     Analyse PPL source and return a list of Issues sorted by line number.
     """
     issues: List[Issue] = []
-
-    # Run the transpiler's preprocessor so bare function declarations
-    # (e.g.  BST_FindFreeSlot() \n BEGIN ... END)  get PROCEDURE injected.
-    t = Transpiler()
-    preprocessed = t._preprocess(ppl_code)
-
-    raw_lines   = ppl_code.replace('\r\n', '\n').replace('\r', '\n').splitlines()
-    proc_lines  = preprocessed.splitlines()
-
-    # Pad to same length in case preprocessor added lines
-    while len(proc_lines) < len(raw_lines):
-        proc_lines.append('')
+    
+    # Pre-process lines to mask strings and comments
+    proc_lines: List[str] = []
+    raw_lines: List[str] = ppl_code.replace('\r\n', '\n').replace('\r', '\n').splitlines()
+    proc_lines  = raw_lines
 
     # ── Pass 1: collect defined function names + all assigned variable names ─
     defined_fns: Set[str] = set()
@@ -294,16 +360,37 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     defined_fn_args: Dict[str, int] = {}
     
     # Scoped tracking for undeclared variable checks
-    fn_params: Dict[str, Set[str]] = {}  # fname -> set of parameter names
-    fn_locals: Dict[str, Set[str]] = {}  # fname -> set of local variable names
+    # Pass 1 Logic: Function and Variable Discovery
+    fn_params: Dict[str, Set[str]] = {} # Map of func_name -> set(params)
+    fn_locals: Dict[str, Set[str]] = {} # Map of func_name -> set(local_vars)
     curr_pass1_fn: Optional[str] = None
 
     for i, raw in enumerate(proc_lines, 1):
         line = _strip_comment(raw).strip()
 
-        # Function declaration (after preprocessing)
+        # Function declaration (handle bare declarations without EXPORT/PROCEDURE)
         m = re.match(r'(?:EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)', line, re.IGNORECASE)
+        # Check for bare function: Name(...) BEGIN
+        if not m:
+            m_bare = re.match(r'^(\w+)\s*\((.*?)\)\s*;?$', line)
+            if m_bare:
+                # To be sure, peek ahead for BEGIN
+                is_proc = False
+                for j in range(i, min(i + 5, len(proc_lines))):
+                    next_line = _strip_comment(proc_lines[j]).strip()
+                    if not next_line: continue
+                    if re.match(r'^BEGIN;?$', next_line, re.IGNORECASE):
+                        is_proc = True
+                        break
+                    if re.match(r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE)\b', next_line, re.IGNORECASE):
+                        break
+                if is_proc: m = m_bare
+        
         if m:
+            params_group = 2 if 'EXPORT' in m.group(0).upper() or 'PROCEDURE' in m.group(0).upper() else 2
+            # Wait, for m_bare: r'^(\w+)\s*\((.*?)\)\s*;?$', group 1 is name, group 2 is params.
+            # For m_export: r'(?:EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)', group 1 is name, group 2 is params.
+            # So it's ALWAYS group 2 for parameters in both regexes!
             fname = m.group(1)
             name_up = fname.upper()
             curr_pass1_fn = name_up
@@ -344,8 +431,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         # Track LOCAL variables
         m_local = re.match(r'^LOCAL\s+(.+?);?\s*$', line, re.IGNORECASE)
         if m_local:
-            # simple split to find words
-            for m_var in re.finditer(r'\b([A-Za-z_]\w*)\b', m_local.group(1)):
+            lhs_part = m_local.group(1).split(':=')[0]
+            for m_var in re.finditer(r'\b([A-Za-z_]\w*)\b', lhs_part):
                 var_name = m_var.group(1).upper()
                 local_vars.add(var_name)
                 if curr_pass1_fn:
@@ -393,17 +480,25 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     def warn(ln, msg, text=''):
         issues.append(Issue(ln, 'WARNING', msg, text))
 
+    _warned_shadows:    Set[str] = set()
+    _warned_zero_index: Set[str] = set()
+
     # ── Duplicate function names (from pass 1) ────────────────────────────────
     for dup in sorted(duplicate_fns):
         err(0, f'Duplicate function name "{dup}" defined more than once')
 
-    # ── Non-ASCII characters ──────────────────────────────────────────────────
+    # ── Non-ASCII characters (only if not in strings or comments) ─────────────
     for i, raw in enumerate(raw_lines, 1):
+        # Strip comments first
+        clean_text = _strip_comment(raw)
+        # Erase strings next
+        safe_text = _erase_strings(clean_text)
+        
         try:
-            raw.encode('ascii')
+            safe_text.encode('ascii')
         except (UnicodeEncodeError, AttributeError):
-            for j, ch in enumerate(raw):
-                if ord(ch) > 127:
+            for j, ch in enumerate(safe_text):
+                if ord(ch) > 127 and ch not in _PPL_UNICODE_OPS:
                     err(i,
                         f'Non-ASCII character "{ch}" (U+{ord(ch):04X}) — '
                         f'HP Prime G1 does not support UTF-8. '
@@ -412,174 +507,380 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     break
 
     # ── Unclosed string check on original lines ───────────────────────────────
+    _ms_open = False   # currently inside a multi-line string
+    _ms_line = 0       # line number where the string was opened
+    _ms_text = ''      # source text of the opening line
     for i, raw in enumerate(raw_lines, 1):
         stripped_raw = _strip_comment(raw).strip()
         if _has_odd_quotes(stripped_raw):
-            err(i, 'Unclosed string literal', stripped_raw)
+            if _ms_open:
+                _ms_open = False   # closing quote found
+            else:
+                _ms_open = True    # opening quote, may span multiple lines
+                _ms_line = i
+                _ms_text = stripped_raw
+    if _ms_open:
+        err(_ms_line, 'Unclosed string literal', _ms_text)
 
-    for i, proc_raw in enumerate(proc_lines, 1):
-        clean   = _strip_comment(proc_raw).strip()
-        display = clean
-
-        if not clean:
+    # ── Pass 2: Main Logic Analysis ──────────────────────────────────────────
+    # Most statement-level and expression-level checks are now handled in the 
+    # bufferized loop below to support multi-line statements.
+    # ── Main Loop ────────────────────────────────────────────────────────────
+    stmt_buf: List[str] = []
+    stmt_start_ln = 1
+    unreachable_kw = "" # To store the keyword that caused unreachability (BREAK, CONTINUE, RETURN)
+    
+    # We'll use a copy of proc_lines to safely peek
+    for i, raw in enumerate(proc_lines, 1):
+        line_clean = _strip_comment(raw).strip()
+        if not line_clean and not stmt_buf:
             continue
-
-        safe = _erase_strings(clean)
-        
-        # ── Expression-level checks ─────────────
-
-        # Unbalanced parentheses
-        # Chained indexing check (e.g. [1][1] or (1)(1))
-        # Physical HP Prime often rejects this with a 'Syntax Error'.
-        if re.search(r'[\]\)]\s*[\[\(]', safe):
-            err(i, 'Chained indexing (e.g. [1][1]) is not supported on the physical HP Prime. Use comma-based indexing instead: [1,1]', display)
-
-        # Massive list literal check
-        for m_list in re.finditer(r'\{([^{}]+)\}', safe):
-            if m_list.group(1).count(',') > 50:
-                warn(i, "Large list literal detected (>50 elements). This can cause a 'Syntax Error' or crash the physical HP Prime compiler. Use MAKELIST(0, X, 1, N) instead.", display)
-
-        # 0-indexing check
-        if re.search(r'\b[A-Za-z_]\w*\s*[\(\[]\s*0\s*[\)\]]', safe):
-            warn(i, "HP Prime arrays and lists are 1-indexed. Indexing with 0 will cause a runtime error.", display)
-
-        # Multiple assignments on one line are valid in PPL
-        pass
-
-        # '=' used instead of ':=' or '=='
-        if not re.match(r'^FOR\b', safe, re.IGNORECASE):
-            if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)', safe):
-                err(i, 'Use ":=" for assignment, or "==" for equality. A single "=" is invalid.', display)
-
-        # ── LHS detection for all statements on this line ────────
-        # This helps 'uninitialized' and 'loop counter' checks.
-        line_lhs_vars: Set[str] = set()
-        # Remove keywords that might confuse LHS detection (like IF ... THEN)
-        stripped_keywords = re.sub(r'\b(IF|ELSE|WHILE|FOR|REPEAT|CASE|EXPORT|PROCEDURE)\b.*?\b(THEN|DO|OF|BEGIN)\b', '', clean, flags=re.IGNORECASE)
-        # Handle simple segments separated by ;
-        for segment in stripped_keywords.split(';'):
-            m_seg = re.match(r'^\s*([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*:=', segment)
-            if m_seg:
-                line_lhs_vars.add(m_seg.group(1).upper())
-                
-        # Handle FOR loops explicitly for initialization
-        m_for_init = re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\b', clean, re.IGNORECASE)
-        if m_for_init:
-            line_lhs_vars.add(m_for_init.group(1).upper())
-
-        # Invalid LHS check (using the first assignment on line for simplicity)
-        m_assign = re.match(r'^(.+?)\s*:=', safe)
-        if m_assign:
-            lhs = m_assign.group(1).strip()
-            if not _is_valid_lhs(lhs):
-                err(i, f'Invalid assignment target "{lhs}" — must be a variable or list element.', display)
             
-            # Shadowing built-in
-            check_lhs = lhs
-            if check_lhs.upper().startswith("LOCAL "):
-                check_lhs = check_lhs[6:].strip()  # pyre-ignore
+        if not stmt_buf:
+            stmt_start_ln = i
             
-            lhs_base_match = re.match(r'^([A-Za-z_]\w*)', check_lhs)
-            if lhs_base_match:
-                lb = lhs_base_match.group(1).upper()
-                if lb in BUILTINS or lb in _STRUCTURAL:
-                    warn(i, f'Shadowing built-in or keyword "{lb}" as a variable', display)
-                
-                # Loop counter modification check
-                if lb in active_for_counters:
-                    warn(i, f"Modifying FOR loop counter '{lhs_base_match.group(1)}' inside the loop body is discouraged and often indicates a logic error.", display)
-                
-                # Mark as assigned
-                if current_fn:
-                    assigned_vars_in_fn.add(lb)
+        stmt_buf.append(line_clean)
+        cb = " ".join(stmt_buf)
+        sf = _erase_strings(cb)
         
-        # Add all detected LHS variables on this line to assigned set
-        if current_fn:
-            assigned_vars_in_fn.update(line_lhs_vars)
+        # Balance check
+        pb = sf.count('(') - sf.count(')')
+        bb = sf.count('{') - sf.count('}')
+        trailing_op = bool(re.search(
+            r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*$', sf, re.IGNORECASE))
+        if pb > 0 or bb > 0 or cb.endswith(',') or cb.endswith(':=') or trailing_op:
+            continue
+            
+        # We have a complete (at least one) statement structure.
+        # Now split by semicolon, but NOT inside strings or nested blocks.
+        # Actually, if we just split by ';' using a simple loop that ignores strings.
+        full_cb = cb
+        stmt_buf = [] # Reset for next
+        
+        # Split into individual statements
+        stmts: List[str] = []
+        sbuf: List[str] = []
+        in_s = False
+        j = 0
+        while j < len(full_cb):
+            ch = full_cb[j]
+            if ch == '"':
+                if not in_s: in_s = True; sbuf.append('"')
+                else:
+                    if j + 1 < len(full_cb) and full_cb[j+1] == '"':
+                        sbuf.append('""'); j += 1
+                    else: in_s = False; sbuf.append('"')
+            elif in_s and ch == '\\' and j + 1 < len(full_cb) and full_cb[j+1] == '"':
+                sbuf.append('\\"'); j += 1
+            elif ch == ';' and not in_s:
+                s = ''.join(sbuf).strip()
+                if s: stmts.append(s + ';') # Keep ; for endswith check
+                sbuf = []
+            else:
+                sbuf.append(ch)
+            j += 1
+        last = ''.join(sbuf).strip()
+        if last: stmts.append(last)
+        
+        for stmt_idx, stmt in enumerate(stmts):
+            # i_stmt is the line number where the statement ends (approx)
+            # but stmt_start_ln is better for multi-line.
+            curr_ln = stmt_start_ln if stmt_idx == 0 else i
+            
+            clean = stmt.strip()
+            # If the statement is empty or just a semicolon, skip
+            if not clean or clean == ';': continue
+            
+            # For keywords, we use a clean version without semicolon
+            safe = _erase_strings(clean)
+            bare_clean = clean.rstrip(';').strip()
+            
+            display = proc_lines[curr_ln - 1]
 
-        # Undeclared variable check & Local usage tracking & Uninitialized check
-        if current_fn:
-            curr_params: Set[str] = fn_params.get(str(current_fn).upper(), set()) if current_fn else set()
-            curr_locals: Set[str] = fn_locals.get(str(current_fn).upper(), set()) if current_fn else set()
-            # Find all word tokens that look like variables
-            for m_tok in re.finditer(r'\b([A-Za-z_]\w*)\b', safe):
-                gs = m_tok.group(1)
-                tok: str = gs.upper() if gs else ""  # pyre-ignore
+            # ── Expression-level checks ───────────────────────────────────────
+            # These were previously in a separate line-based loop.
+            
+            # Chained indexing check [1][1]
+            if re.search(r'[\]\)]\s*[\[\(]', safe):
+                err(curr_ln, 'Chained indexing (e.g. [1][1]) is not supported on the physical HP Prime. Use comma-based indexing instead: [1,1]', display)
+
+            # Massive list literal check
+            for m_list_lit in re.finditer(r'\{([^{}]+)\}', safe):
+                if m_list_lit.group(1).count(',') > 50:
+                    warn(curr_ln, "Large list literal detected (>50 elements). This can cause a 'Syntax Error' or crash the physical HP Prime compiler. Use MAKELIST(0, X, 1, N) instead.", display)
+
+            # 0-indexing check - skip built-in calls like WAIT(0)
+            for m_zero in re.finditer(r'\b([A-Za-z_]\w*)\s*[\(\[]\s*0\s*[\)\]]', safe):
+                vname = m_zero.group(1).upper()
+                if vname not in BUILTINS and vname not in _warned_zero_index:
+                    _warned_zero_index.add(vname)
+                    warn(curr_ln, "HP Prime arrays and lists are 1-indexed. Indexing with 0 will cause a runtime error.", display)
+                    break
+            # '=' used instead of ':=' or '=='
+            if not re.match(r'^FOR\b', safe, re.IGNORECASE):
+                # We skip if it's likely a comment or already handled
+                if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)', safe):
+                    err(curr_ln, 'Use ":=" for assignment, or "==" for equality. A single "=" is invalid.', display)
+
+            # Trailing operators
+            if re.search(r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*;?\s*$', safe, re.IGNORECASE):
+                err(curr_ln, 'Expression ends with a trailing operator', display)
+
+            # ── UNREACHABLE CHECK ─────────────────────────────────────────────
+
+            remaining = bare_clean
+            
+            # Use a while loop to process keywords part of the same statement
+            # (e.g., "IF cond THEN FOR i ... DO BEGIN")
+            while remaining:
+                remaining = remaining.strip()
+                if not remaining: break
                 
-                # Skip if it's currently on the LHS of an assignment on this line
-                is_lhs = (tok in line_lhs_vars)
+                found_kw = False
+                
+                # ── Function declaration ───────────────────
+                m_fn = re.match(r'^(?:EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)', remaining, re.IGNORECASE)
+                if not m_fn:
+                    m_bare = re.match(r'^(\w+)\s*\((.*?)\)', remaining)
+                    if m_bare:
+                        is_proc = False
+                        cur_idx = int(curr_ln)
+                        for k in range(cur_idx, min(cur_idx + 5, len(proc_lines))):
+                            nxt = _strip_comment(proc_lines[k]).strip()
+                            if not nxt: continue
+                            if re.match(r'^BEGIN;?$', nxt, re.IGNORECASE):
+                                is_proc = True; break
+                            if re.match(r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE|END)\b', nxt, re.IGNORECASE):
+                                break
+                        if is_proc: m_fn = m_bare
 
-                # If it's a local variable, mark it as used
-                if tok in curr_locals:
-                    # Ignore the declaration itself (when it follows the LOCAL keyword)
-                    if not re.match(r'^LOCAL\b', clean, re.IGNORECASE):
+                if m_fn:
+                    fname = m_fn.group(1)
+                    if current_fn:
+                        err(curr_ln, f'"{fname}" declared inside "{current_fn}" — missing END?', display)
+                    current_fn = fname
+                    fn_start_ln = curr_ln
+                    executable_statement_seen = False
+                    used_locals_in_fn = set() 
+                    assigned_vars_in_fn = set()
+                    for p in m_fn.group(2).split(','):
+                        p = p.strip().upper()
+                        if p: assigned_vars_in_fn.add(p)
+                    active_for_counters = []
+                    case_default_stack = []
+                    unreachable_flag = False
+                    remaining = remaining[m_fn.end():].strip()
+                    found_kw = True
+
+                # ── BEGIN ───────────────────
+                elif (m_begin := re.match(r'^BEGIN\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('BEGIN', curr_ln))
+                    executable_statement_seen = False
+                    remaining = remaining[m_begin.end():].strip()
+                    found_kw = True
+
+                # ── FOR ───────────────────
+                elif (m_for := re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\s+.+?\s+TO\s+.+?(?:\s+STEP\s+.+?)?\s+DO\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('FOR', curr_ln))
+                    loop_depth += 1
+                    active_for_counters.append(m_for.group(1).upper())
+                    assigned_vars_in_fn.add(m_for.group(1).upper())
+                    executable_statement_seen = False
+                    remaining = remaining[m_for.end():].strip()
+                    found_kw = True
+
+                # ── WHILE ───────────────────
+                elif (m_while := re.match(r'^WHILE\s+(.+?)\s+DO\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('WHILE', curr_ln))
+                    loop_depth += 1
+                    cond = m_while.group(1)
+                    if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
+                         warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                    executable_statement_seen = False
+                    remaining = remaining[m_while.end():].strip()
+                    found_kw = True
+
+                # ── REPEAT ───────────────────
+                elif (m_repeat := re.match(r'^REPEAT\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('REPEAT', curr_ln))
+                    loop_depth += 1
+                    executable_statement_seen = False
+                    remaining = remaining[m_repeat.end():].strip()
+                    found_kw = True
+
+                # ── UNTIL ───────────────────
+                elif (m_until := re.match(r'^UNTIL\s+(.+?)\b', remaining, re.IGNORECASE)):
+                    if block_stack and block_stack[-1][0] == 'REPEAT':
+                        block_stack.pop(); loop_depth = max(0, loop_depth - 1)
+                    else:
+                        err(curr_ln, 'UNTIL without a matching REPEAT', display)
+                    executable_statement_seen = True
+                    remaining = remaining[m_until.end():].strip()
+                    found_kw = True
+
+                # ── IF ───────────────────
+                elif (m_if := re.match(r'^IF\s+(.+?)\s+THEN\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('IF', curr_ln))
+                    cond = m_if.group(1)
+                    if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
+                         warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                    executable_statement_seen = False
+                    remaining = remaining[m_if.end():].strip()
+                    found_kw = True
+
+                # ── ELSE ───────────────────
+                elif (m_else := re.match(r'^ELSE\b', remaining, re.IGNORECASE)):
+                    m_elseif = re.match(r'^ELSE\s+IF\s+(.+?)\s+THEN\b', remaining, re.IGNORECASE)
+                    if m_elseif:
+                        # ELSE IF introduces a new nested IF block needing its own END
+                        block_stack.append(('IF', curr_ln))
+                        cond = m_elseif.group(1)
+                        if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
+                             warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                        remaining = remaining[m_elseif.end():].strip()
+                    else:
+                        if not any(kw == 'IF' for kw, ln in block_stack) and not case_default_stack:
+                             warn(curr_ln, 'ELSE outside of an IF-THEN block', display)
+                        remaining = remaining[m_else.end():].strip()
+                    executable_statement_seen = False
+                    found_kw = True
+
+                # ── CASE / DEFAULT ───────────────────
+                elif (m_case := re.match(r'^CASE\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('CASE', curr_ln)); case_default_stack.append(False)
+                    remaining = remaining[m_case.end():].strip()
+                    found_kw = True
+                elif (m_default := re.match(r'^DEFAULT\b', remaining, re.IGNORECASE)):
+                    if case_default_stack: 
+                        cast(List[bool], case_default_stack)[-1] = True
+                    else: err(curr_ln, 'DEFAULT outside of a CASE block', display)
+                    remaining = remaining[m_default.end():].strip()
+                    found_kw = True
+
+                # ── END ───────────────────
+                elif (m_end := re.match(r'^END\b', remaining, re.IGNORECASE)):
+                    if block_stack:
+                        popped, _ = block_stack.pop()
+                        if popped in ('FOR', 'WHILE', 'REPEAT'):
+                             loop_depth = max(0, loop_depth - 1)
+                             if popped == 'FOR' and active_for_counters: active_for_counters.pop()
+                        if popped == 'CASE': case_default_stack.pop()
+                        if popped == 'BEGIN' and not block_stack:
+                            if current_fn:
+                                curr_lc = cast(Set[str], fn_locals.get(str(current_fn).upper(), set()))
+                                for uv in (curr_lc - used_locals_in_fn):
+                                    warn(fn_start_ln, f"LOCAL variable '{uv}' is declared but never used in function '{current_fn}'.", "")
+                            current_fn = None
+                    remaining = remaining[m_end.end():].strip()
+                    found_kw = True
+
+                # ── LOCAL ───────────────────
+                elif (m_local := re.match(r'^LOCAL\s+(.+?)\b', remaining, re.IGNORECASE)):
+                    if not current_fn: err(curr_ln, 'LOCAL declaration outside of any function', display)
+                    lstr = m_local.group(1)
+                    if '[' in lstr or ']' in lstr:
+                        err(curr_ln, 'Syntax Error: Invalid array declaration "LOCAL name[size]".', display)
+                    if '(' in lstr or ')' in lstr:
+                        if ':=' not in lstr: err(curr_ln, 'Syntax Error: Parentheses are not allowed in LOCAL declarations.', display)
+                    
+                    l_str = str(lstr)
+                    dp = l_str.split(':=')[0]
+                    for mv in re.finditer(r'\b([A-Za-z_]\w*)\b', dp):
+                        v = mv.group(1).upper()
+                        if (v in BUILTINS or v in _STRUCTURAL) and v not in _warned_shadows:
+                            _warned_shadows.add(v); warn(curr_ln, f'Shadowing keyword "{v}"', display)
+                        if v in _RESERVED_GLOBALS and v not in _warned_shadows:
+                            _warned_shadows.add(v); warn(curr_ln, f'Shadowing global "{v}"', display)
+                        if ':=' in l_str: assigned_vars_in_fn.add(v)
+                    remaining = remaining[m_local.end():].strip()
+                    found_kw = True
+
+                if not found_kw: break
+
+            # ── Assignments ───────────────────────────────────────────────────
+            for match in re.finditer(r'([A-Za-z_]\w*(?:\s*[\(\[].+?[\)\]])?)\s*:=', safe):
+                target = match.group(1)
+                # Check if this is a valid target
+                _is_valid_lhs(target, curr_ln, issues, display)
+                
+                # Track assignment to avoid "used before assigned"
+                var_match = re.match(r'^([A-Za-z_]\w*)', target)
+                if var_match and current_fn:
+                    assigned_vars_in_fn.add(var_match.group(1).upper())
+
+            # ── Usage / Call ──────────────────────────────────────────────────
+            # Undeclared variable check & Local usage tracking & Uninitialized check
+            if current_fn:
+                cf_up = current_fn.upper()
+                curr_params = fn_params.get(cf_up, set())
+                curr_locals = fn_locals.get(cf_up, set())
+                
+                # Find all word tokens that look like variables or calls
+                for m_tok in re.finditer(r'\b([A-Za-z_]\w*)\b', safe):
+                    gs = m_tok.group(1)
+                    tok = gs.upper()
+                    
+                    # If it's followed by ( it's a call
+                    # Use a slice that is safe and check startswith
+                    tail = safe[m_tok.end():]
+                    is_call = tail.lstrip().startswith('(')
+                    # Track local usage FIRST, before any skip/continue
+                    if tok in curr_locals or tok in used_locals_in_fn:
                         used_locals_in_fn.add(tok)
-                        
-                        # Uninitialized check
-                        if not is_lhs and tok not in assigned_vars_in_fn:
-                            warn(i, f"LOCAL variable '{m_tok.group(1)}' is used before being assigned a value.", display)
-                
-                # Skip if it's a structural keyword or built-in
-                if tok in _STRUCTURAL or tok in BUILTINS:
-                    continue
-                # Skip if it's a reserved global (except I and J, which are common loop counters)
-                if tok in _RESERVED_GLOBALS and tok not in ['I', 'J']:
-                    continue
-                # Skip if it's a known function being called
-                if tok in defined_fns:
-                    # Recursion warning
-                    if tok == str(current_fn).upper():
-                        warn(i, f"Recursive call to '{m_tok.group(1)}' detected. HP Prime has a very shallow stack; ensure recursion depth is minimal to avoid 'Stack Overflow'.", display)
-                    continue
-                # Skip if it's a parameter or local
-                if tok in curr_params or tok in curr_locals:
-                    continue
-                
-                # Not in any known set = implicit global warning
-                # (Ignore the function name itself in the EXPORT declaration line)
-                if not (i == fn_start_ln and tok == str(current_fn).upper()):
-                    warn(i, f"Variable '{m_tok.group(1)}' is used but not declared as LOCAL or parameter. Implicit globals are discouraged.", display)
 
-        # Trailing operators
-        if re.search(r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*;?\s*$', safe, re.IGNORECASE):
-            err(i, 'Expression ends with a trailing operator', display)
+                    # Skip structural keywords
+                    if tok in _STRUCTURAL or tok in BUILTINS or tok == 'LOCAL' or tok == 'EXPORT' or tok == 'PROCEDURE' or tok == 'BEGIN' or tok == 'END':
+                        continue
 
-        # ── Call checking (argument counts + unknown functions + WAIT check + Coordinate check) ───────────────
-        for m_call in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', safe):
-            fg = m_call.group(1)
-            func_name: str = fg.upper() if fg else ""
-            
-            # Find matching parenthesis
-            start_idx = m_call.end() - 1
-            depth = 0
-            end_idx = -1
-            for idx in range(start_idx, len(safe)):
-                if safe[idx] == '(': depth += 1  # pyre-ignore
-                elif safe[idx] == ')':  # pyre-ignore
-                    depth -= 1
-                    if depth == 0:
-                        end_idx = idx
-                        break
-            
-            if end_idx != -1:
-                args_str: str = safe[start_idx+1 : end_idx]  # pyre-ignore
-                count: int = _count_args(args_str)
+                    # Skip reserved globals (A-Z, G0-G9, etc.) - legacy PPL uses them
+                    if tok in _RESERVED_GLOBALS:
+                        continue
+
+
+                    if is_call:
+                        # ARG count check
+                        if tok in BUILTIN_ARGS:
+                            pass
+                        elif tok in defined_fns:
+                            if tok == cf_up and curr_ln != fn_start_ln:
+                                warn(curr_ln, f"Recursive call to '{gs}' detected. HP Prime has a very shallow stack.", display)
+                    else:
+                        # Potential implicit global or typo
+                        if tok not in curr_params and tok not in curr_locals and tok not in assigned_vars and tok not in defined_fns:
+                             # warn(curr_ln, f"Variable '{gs}' is used but not declared as LOCAL or parameter. Implicit globals are discouraged.", display)
+                             pass
+
+            # ── Specific Function Call Analysis ───────────────────────────────
+            for m_call in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', safe):
+                fg = m_call.group(1)
+                func_name = fg.upper()
                 
-                # Built-in function
+                # Extract argument string (handling nested parens)
+                start_idx = m_call.end()
+                arg_buf = []
+                p_depth = 1
+                k = start_idx
+                while k < len(safe) and p_depth > 0:
+                    ch = safe[k]
+                    if ch == '(': p_depth += 1
+                    elif ch == ')': p_depth -= 1
+                    if p_depth > 0: arg_buf.append(ch)
+                    k += 1
+                args_str = "".join([str(c) for c in arg_buf]) # pyre-ignore
+                count = _count_args(args_str)
+
+                # Built-in check
                 if func_name in BUILTIN_ARGS:
-                    min_a, max_a = BUILTIN_ARGS[func_name]
-                    if count < min_a or count > max_a:
-                        msg = f'"{m_call.group(1)}" expects '
-                        msg += f'{min_a} arguments' if min_a == max_a else f'{min_a} to {max_a} arguments'
-                        msg += f', got {count}'
-                        err(i, msg, display)
+                    min_args, max_args = BUILTIN_ARGS[func_name]
+                    if count < min_args or count > max_args:
+                        err(curr_ln, f'"{fg}" expects {min_args}-{max_args} arguments, got {count}', display)
                     
                     # Specific Checks: WAIT
                     if func_name == 'WAIT' and count == 1:
                         try:
                             wait_val = float(args_str.strip())
                             if wait_val > 10:
-                                warn(i, f'WAIT time is {wait_val}s (> 10s). This may cause the calculator to appear frozen.', display)
+                                warn(curr_ln, f'WAIT time is {wait_val}s (> 10s). This may cause the calculator to appear frozen.', display)
                         except ValueError:
                             pass # Not a literal float, ignore
                     
@@ -592,255 +893,28 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                                 y = int(args_list[1])
                                 # Strict bounds are [0,319]x[0,239]
                                 if x < 0 or x > 319 or y < 0 or y > 239:
-                                    warn(i, f'Hardcoded coordinate ({x}, {y}) is outside the screen bounds (320x240).', display)
+                                    warn(curr_ln, f'Hardcoded coordinate ({x}, {y}) is outside the screen bounds (320x240).', display)
                         except ValueError:
                             pass # Not literal ints, ignore
 
-                # User-defined function
-                elif func_name in defined_fn_args:
-                    expected = defined_fn_args.get(func_name, 0)
+                    # Specific Checks: Output Arguments (CHOOSE, INPUT)
+                    if func_name in ['INPUT', 'CHOOSE'] and current_fn:
+                        cf_up = current_fn.upper()
+                        arg0_match = re.search(r'\b([A-Za-z_]\w*)\b', args_str)
+                        if arg0_match:
+                            v0 = arg0_match.group(1).upper()
+                            assigned_vars_in_fn.add(v0)
+                            if v0 in fn_locals.get(cf_up, set()):
+                                used_locals_in_fn.add(v0)
+
+                # User-defined check
+                elif func_name in defined_fn_args and current_fn is not None:
+                    expected = defined_fn_args[func_name]
                     if count != expected:
-                        err(i, f'"{m_call.group(1)}" expects {expected} arguments, got {count}', display)
-                # Potential indexing error or unknown function
+                        err(curr_ln, f'"{fg}" expects {expected} arguments, got {count}', display)
                 else:
-                    cf_up = current_fn.upper() if current_fn else ""  # pyre-ignore
-                    if not (func_name in assigned_vars or func_name in local_vars or (current_fn and func_name in fn_params.get(cf_up, set()))):
-                         if func_name not in _STRUCTURAL:
-                             warn(i, f'Call to unknown function "{m_call.group(1)}"', display)
-
-        # ── Function declaration ──────────────────────────────────────────────
-        m = re.match(r'(EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)\s*;?$', clean, re.IGNORECASE)
-        if m:
-            if current_fn:
-                err(i, f'"{m.group(2)}" declared inside "{current_fn}" — missing END?', display)
-            current_fn  = m.group(2)
-            fn_start_ln = i
-            executable_statement_seen = False
-            used_locals_in_fn = set() 
-            assigned_vars_in_fn = set()
-            # Parameters are assigned
-            for p in m.group(3).split(','):
-                p = p.strip().upper()
-                if p: assigned_vars_in_fn.add(p)
-            
-            active_for_counters = []
-            case_default_stack = []
-            unreachable_flag = False
-            continue
-
-        # ── BEGIN ─────────────────────────────────────────────────────────────
-        if re.match(r'^BEGIN;?$', clean, re.IGNORECASE):
-            block_stack.append(('BEGIN', i))
-            executable_statement_seen = False
-            continue
-
-        # ── FOR ───────────────────────────────────────────────────────────────
-        if re.match(r'^FOR\b', safe, re.IGNORECASE):
-            m_for = re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\s+.+?\s+TO\s+.+?(?:\s+STEP\s+.+?)?\s+DO\b', safe, re.IGNORECASE)
-            if not m_for:
-                err(i, 'Invalid FOR loop syntax. Expected: FOR var FROM start TO end [STEP step] DO', display)
-            else:
-                block_stack.append(('FOR', i))
-                loop_depth += 1  # pyre-ignore
-                active_for_counters.append(m_for.group(1).upper())
-                # Loop counter is assigned
-                assigned_vars_in_fn.add(m_for.group(1).upper())
-            executable_statement_seen = False
-            continue
-
-        # ── WHILE ─────────────────────────────────────────────────────────────
-        if re.match(r'^WHILE\b', safe, re.IGNORECASE):
-            m_while = re.match(r'^WHILE\s+(.+?)\s+DO;?$', safe, re.IGNORECASE)
-            if not m_while:
-                err(i, 'Invalid WHILE loop syntax. Expected: WHILE condition DO', display)
-            else:
-                block_stack.append(('WHILE', i))
-                loop_depth += 1
-                
-                # Check for assignment in condition
-                cond = m_while.group(1)
-                if re.search(r'(?<![:<>!=])=(?!=)|:=', cond):
-                     warn(i, "Possible assignment inside condition. Use '==' for equality comparison.", display)
-            
-            executable_statement_seen = False
-            continue
-
-        # ── REPEAT ───────────────────────────────────────────────────────────
-        if re.match(r'^REPEAT;?$', clean, re.IGNORECASE):
-            block_stack.append(('REPEAT', i))
-            loop_depth += 1
-            executable_statement_seen = False
-            continue
-
-        # ── UNTIL (closes REPEAT) ─────────────────────────────────────────────
-        if re.match(r'^UNTIL\b', clean, re.IGNORECASE):
-            if block_stack and block_stack[-1][0] == 'REPEAT':
-                _, start_line = block_stack.pop()
-                # No warning for empty REPEAT/UNTIL, it's a valid construct
-                loop_depth = max(0, loop_depth - 1)
-            else:
-                err(i, 'UNTIL without a matching REPEAT', display)
-            executable_statement_seen = True
-            unreachable_flag = False # New block segment
-            continue
-
-        # ── CASE ─────────────────────────────────────────────────────────────
-        if re.match(r'^CASE\b', clean, re.IGNORECASE):
-            # CASE <expr> OF
-            if not re.search(r'\bOF\b', safe, re.IGNORECASE):
-                err(i, 'CASE missing OF keyword', display)
-            else:
-                block_stack.append(('CASE', i))
-                case_default_stack.append(False)
-            executable_statement_seen = False
-            continue
-
-        # ── DEFAULT ──────────────────────────────────────────────────────────
-        if re.match(r'^DEFAULT\s*:\s*$', clean, re.IGNORECASE) or re.match(r'^DEFAULT\b', clean, re.IGNORECASE):
-            if not any(b[0] == 'CASE' for b in block_stack):
-                err(i, 'DEFAULT without a matching CASE', display)
-            else:
-                if case_default_stack: case_default_stack[-1] = True
-            executable_statement_seen = False
-            unreachable_flag = False
-            continue
-
-        # ── ELSE IF (stays within same IF block — no stack change) ────────────
-        if re.match(r'^ELSE\s+IF\b', safe, re.IGNORECASE):
-            if not any(b[0] == 'IF' for b in block_stack):
-                err(i, 'ELSE IF without a matching IF', display)
-            
-            m_elif = re.search(r'^ELSE\s+IF\s+(.+?)\s+THEN\b', safe, re.IGNORECASE)
-            if not m_elif:
-                err(i, 'ELSE IF missing THEN keyword', display)
-            else:
-                cond = m_elif.group(1)
-                if re.search(r'(?<![:<>!=])=(?!=)|:=', cond):
-                     warn(i, "Possible assignment inside condition. Use '==' for equality comparison.", display)
-            executable_statement_seen = False
-            unreachable_flag = False
-            continue
-
-        # ── ELSE ──────────────────────────────────────────────────────────────
-        if re.match(r'^ELSE;?$', clean, re.IGNORECASE):
-            if not any(b[0] == 'IF' for b in block_stack):
-                err(i, 'ELSE without a matching IF', display)
-            executable_statement_seen = False
-            unreachable_flag = False
-            continue
-
-        # ── IF … THEN ────────────────────────────────────────────────────────
-        if re.match(r'^IF\b', safe, re.IGNORECASE):
-            block_stack.append(('IF', i))
-            executable_statement_seen = False
-            
-            m_if = re.search(r'^IF\s+(.+?)(?:\s+THEN\b|$)', safe, re.IGNORECASE)
-            if m_if:
-                cond = m_if.group(1)
-                if re.search(r'(?<![:<>!=])=(?!=)|:=', cond):
-                     warn(i, "Possible assignment inside condition. Use '==' for equality comparison.", display)
-            
-            if re.search(r'(?<!^)\bEND;?\s*$', safe, re.IGNORECASE):
-                if block_stack: block_stack.pop()
-            continue
-
-        # ── END ───────────────────────────────────────────────────────────────
-        if re.search(r'\bEND;?\s*$', safe, re.IGNORECASE) and not re.match(r'^(IF|ELSE\s+IF|FOR|WHILE|RETURN)\b', safe, re.IGNORECASE):
-            if block_stack:
-                popped_kw, start_line = block_stack.pop()
-                if popped_kw in ('FOR', 'WHILE', 'REPEAT'):
-                    loop_depth = max(0, loop_depth - 1)
-                    if popped_kw == 'FOR' and active_for_counters:
-                        active_for_counters.pop()
-                
-                # CASE cleanup
-                if popped_kw == 'CASE':
-                    has_default = case_default_stack.pop()
-                    if not has_default:
-                        warn(i, "CASE statement missing DEFAULT branch. Unhandled values will cause the block to be skipped silently.", display)
-
-                # -- Empty block check removed --
-
-                # Closing the function's opening BEGIN → function is done
-                if popped_kw == 'BEGIN' and not block_stack:
-                    # Check for unused locals
-                    if current_fn:
-                        curr_locals = fn_locals.get(str(current_fn).upper(), set())
-                        unused = curr_locals - used_locals_in_fn
-                        for uv in unused:
-                            warn(i, f"LOCAL variable '{uv}' is declared but never used in function '{current_fn}'.", "")
-
-                    current_fn = None
-            elif current_fn:
-                current_fn = None
-            else:
-                err(i, 'END without a matching block or function', display)
-            
-            executable_statement_seen = True
-            unreachable_flag = False # End of block clears unreachable
-            continue
-
-        # ── BREAK / CONTINUE outside a loop ───────────────────────────────────
-        if re.match(r'^BREAK;?$', clean, re.IGNORECASE):
-            if loop_depth == 0:
-                err(i, 'BREAK used outside of a loop', display)
-            unreachable_flag = True
-            continue
-        if re.match(r'^CONTINUE;?$', clean, re.IGNORECASE):
-            if loop_depth == 0:
-                err(i, 'CONTINUE used outside of a loop', display)
-            unreachable_flag = True
-            continue
-
-        # ── RETURN outside function ───────────────────────────────────────────
-        if re.match(r'^RETURN\b', clean, re.IGNORECASE):
-            if not current_fn:
-                err(i, 'RETURN outside of any function', display)
-            unreachable_flag = True
-            
-            if re.search(r'(?<!^)\bEND;?\s*$', safe, re.IGNORECASE):
-                if block_stack: block_stack.pop()
-            continue
-
-        m_local = re.match(r'^LOCAL\b\s+(.+?);?\s*$', clean, re.IGNORECASE)
-        if m_local:
-            if not current_fn:
-                err(i, 'LOCAL declaration outside of any function', display)
-            
-            # Check for invalid characters in LOCAL (e.g. brackets for array sizing)
-            if '[' in m_local.group(1) or ']' in m_local.group(1):
-                err(i, 'Syntax Error: Invalid array declaration "LOCAL name[size]". PPL does not support C-style array sizing. Use "LOCAL sx;" and then "sx := MAKELIST(0, X, 1, 100);" instead.', display)
-
-            if '(' in m_local.group(1) or ')' in m_local.group(1):
-                err(i, 'Syntax Error: Parentheses are not allowed in LOCAL declarations. If you are trying to declare an array, use "LOCAL sx;" and then "sx := MAKELIST(0, X, 1, 100);"', display)
-
-            # Extract the part before any := to find the variables being declared
-            declaration_part = m_local.group(1).split(':=')[0]
-            found_vars = list(re.finditer(r'\b([A-Za-z_]\w*)\b', declaration_part))
-            # Check for shadowing & Track init
-            for m_var in found_vars:
-                v = m_var.group(1).upper()
-                if v in BUILTINS or v in _STRUCTURAL:
-                    warn(i, f'Shadowing built-in keyword "{v}" with a LOCAL variable', display)
-                if v in _RESERVED_GLOBALS:
-                    warn(i, f'Shadowing reserved global variable "{v}" with a LOCAL declaration. This is permitted but use caution.', display)
-                
-                # Track if initialized on the same line
-                if ':=' in m_local.group(1):
-                    assigned_vars_in_fn.add(v)
-            continue
-
-        # ── Missing semicolon  [ERROR] ──────────────────────────────────────
-        is_block_kw = bool(re.match(
-            r'^(IF|FOR|WHILE|REPEAT|ELSE|BEGIN|END|UNTIL|EXPORT|PROCEDURE|LOCAL|RETURN|BREAK|CONTINUE|CASE|DEFAULT)\b',
-            clean, re.IGNORECASE
-        ))
-        if current_fn and not is_block_kw and not clean.startswith('//') and not clean.endswith(';'):
-            err(i, 'Statement missing semicolon', display)
-            
-        # If the line wasn't a control flow opener, it counts as an executable statement
-        if current_fn and not is_block_kw:
-            executable_statement_seen = True
+                    # Unknown or index access
+                    pass
 
     # ── End-of-file: unclosed block checks ───────────────────────────────────
     for kw, ln in block_stack:

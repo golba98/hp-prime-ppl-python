@@ -33,8 +33,8 @@ class Transpiler:
                 for j in range(i + 1, end_idx):  # type: ignore
                     ns = _strip_comment(lines[j]).strip()
                     if not ns: continue
-                    if re.match(r'^BEGIN;?$', ns, re.IGNORECASE): is_proc = True; break
-                    if re.match(r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE)\b', ns, re.IGNORECASE): break
+                    if re.match(r'^BEGIN;?$', ns, re.IGNORECASE): is_proc = True
+                    break  # stop at first non-blank line (BEGIN or not)
                 if is_proc: line = line.replace(nc, 'PROCEDURE ' + nc.rstrip(';'))
             result.append(line)
         
@@ -114,6 +114,7 @@ class Transpiler:
             safe = _safe_name(fn)
             if safe != fn: self._emit0(f"{safe} = _rt.{fn}")
         self._emit0("CAS = _rt.CAS")
+        self._emit0("pi = math.pi")  # HP Prime π constant
         self._emit0("")
 
     def _emit_footer(self, out_path):
@@ -133,13 +134,21 @@ class Transpiler:
             self._indent = 1; gvars = self._globals.get(m.group(2), set())
             if gvars: self._emit(f"global {', '.join(sorted(gvars))}")
             return
+        # EXPORT variable := value  (exported global, not a function)
+        m_expvar = re.match(r'^EXPORT\s+(.+)$', line, re.IGNORECASE)
+        if m_expvar: line = m_expvar.group(1).strip()
+
         if re.match(r'^BEGIN;?$', line, re.IGNORECASE): return
         if re.match(r'^END;?$', line, re.IGNORECASE):
             if self._out and self._out[-1].strip().endswith(':'): self._emit("pass")
             self._indent = max(0, self._indent - 1)
             if self._iferr_stack and self._iferr_stack[-1] == self._indent: self._iferr_stack.pop()
-            if self._case_stack and len(self._case_stack) > self._indent:
+            # Pop CASE when indent drops below the level where CASE was opened.
+            # Since CASE doesn't own an indent level, also restore the indent so
+            # the enclosing block's END is not consumed.
+            if self._case_stack and self._indent < self._case_stack[-1]['indent']:
                 self._case_stack.pop()
+                self._indent += 1  # restore: CASE didn't allocate this indent level
             if self._indent == 0: self._cur_fn = None; self._emit()
             return
         
@@ -186,7 +195,8 @@ class Transpiler:
         
         m = re.match(r'^IF\s+(.+?)\s+THEN\b\s*(.*)$', line, re.IGNORECASE)
         if m:
-            if self._case_stack:
+            # Only treat as a CASE branch if this IF is at the CASE's own indent level
+            if self._case_stack and self._indent == self._case_stack[-1]['indent']:
                 verb = "if" if self._case_stack[-1]['first'] else "elif"
                 self._case_stack[-1]['first'] = False
                 self._emit(f"{verb} {_xform(m.group(1))}:")
@@ -244,9 +254,10 @@ class Transpiler:
                 if not buf: self._emit()
                 continue
             buf.append(cl); cb = " ".join(buf); sf = _erase_strings(cb); pb, bb = sf.count('(') - sf.count(')') , sf.count('{') - sf.count('}')
-            if pb > 0 or bb > 0 or cb.endswith(',') or cb.endswith(':='): continue
+            trailing_op = bool(re.search(r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*$', sf, re.IGNORECASE))
+            if pb > 0 or bb > 0 or cb.endswith(',') or cb.endswith(':=') or trailing_op: continue
             
-            stmts, sbuf, in_s, i = [], [], False, 0
+            stmts, sbuf, in_s, pdepth, i = [], [], False, 0, 0
             while i < len(cb):
                 ch = cb[i]
                 if ch == '"':
@@ -256,7 +267,9 @@ class Transpiler:
                         else: in_s = False; sbuf.append('"')
                 elif in_s and ch == '\\' and i + 1 < len(cb) and cb[i+1] == '"':
                     sbuf.append('\\"'); i += 1
-                elif ch == ';' and not in_s:
+                elif not in_s and ch in '([{': pdepth += 1; sbuf.append(ch)
+                elif not in_s and ch in ')]}': pdepth = max(0, pdepth - 1); sbuf.append(ch)
+                elif ch == ';' and not in_s and pdepth == 0:
                     s = ''.join(sbuf).strip()
                     if s: stmts.append(s)
                     sbuf = []
