@@ -14,6 +14,7 @@ class Transpiler:
         self._globals: dict[str, set[str]] = {}
         self._iferr_stack: list[int] = []
         self._case_stack: list[dict[str, bool | int]] = []
+        self._block_type_stack: list[str] = []  # track block types per indent level
 
     def _pad(self): return '    ' * self._indent
     def _emit(self, line=''): self._out.append(self._pad() + line if line else '')
@@ -114,6 +115,7 @@ class Transpiler:
             safe = _safe_name(fn)
             if safe != fn: self._emit0(f"{safe} = _rt.{fn}")
         self._emit0("CAS = _rt.CAS")
+        self._emit0("Finance = _rt.Finance")
         self._emit0("pi = math.pi")  # HP Prime π constant
         self._emit0("")
 
@@ -126,12 +128,19 @@ class Transpiler:
     def _transpile_line(self, line):
         line = line.strip(); 
         if not line: return
+        # Skip forward declarations: bare user-function calls at module level
+        if self._indent == 0 and self._cur_fn is None:
+            m_fwd = re.match(r'^([A-Za-z_]\w*)\s*\(([^()]*)\)\s*;?$', line)
+            if m_fwd:
+                fn_names = {name for name, _ in self._fn_order}
+                if m_fwd.group(1) in fn_names or m_fwd.group(1).upper() in {n.upper() for n, _ in self._fn_order}:
+                    return  # forward declaration — skip
         m = re.match(r'^(EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\);?$', line, re.IGNORECASE)
         if m:
             self._cur_fn, self._indent = m.group(2), 0
             params = [_safe_name(p.strip()) for p in m.group(3).split(',') if p.strip()]
             self._emit(f"def {m.group(2)}({', '.join(params)}):")
-            self._indent = 1; gvars = self._globals.get(m.group(2), set())
+            self._indent = 1; self._block_type_stack = ['fn']; gvars = self._globals.get(m.group(2), set())
             if gvars: self._emit(f"global {', '.join(sorted(gvars))}")
             return
         # EXPORT variable := value  (exported global, not a function)
@@ -140,8 +149,9 @@ class Transpiler:
 
         if re.match(r'^BEGIN;?$', line, re.IGNORECASE): return
         if re.match(r'^END;?$', line, re.IGNORECASE):
-            if self._out and self._out[-1].strip().endswith(':'): self._emit("pass")
+            if any(True for _ in [next((l for l in reversed(self._out) if l.strip()), '')]) and next((l for l in reversed(self._out) if l.strip()), '').strip().endswith(':'): self._emit("pass")
             self._indent = max(0, self._indent - 1)
+            _bts_popped = self._block_type_stack.pop() if self._block_type_stack else 'if'
             if self._iferr_stack and self._iferr_stack[-1] == self._indent: self._iferr_stack.pop()
             # Pop CASE when indent drops below the level where CASE was opened.
             # Since CASE doesn't own an indent level, also restore the indent so
@@ -149,7 +159,8 @@ class Transpiler:
             if self._case_stack and self._indent < self._case_stack[-1]['indent']:
                 self._case_stack.pop()
                 self._indent += 1  # restore: CASE didn't allocate this indent level
-            if self._indent == 0: self._cur_fn = None; self._emit()
+                self._block_type_stack.append(_bts_popped)
+            if self._indent == 0: self._cur_fn = None; self._emit(); self._block_type_stack = []
             return
         
         # CASE statement
@@ -162,6 +173,7 @@ class Transpiler:
         if m and self._case_stack:
             self._emit("else:")
             self._indent += 1
+            self._block_type_stack.append('if')
             self._case_stack[-1]['has_default'] = True
             if m.group(1): self._transpile_line(m.group(1))
             return
@@ -176,22 +188,38 @@ class Transpiler:
                     if im: self._emit(f"{_safe_name(im.group(1))} = {_xform(im.group(2))}")
                     else: self._emit(f"{_safe_name(d)} = 0")
             return
+        # FOR ... DOWNTO (descending loop)
+        m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+DOWNTO\s+(.+?)(?:\s+STEP\s+(.+?))?\s+DO\s*(.*)$', line, re.IGNORECASE)
+        if m:
+            start, stop, step = _xform(m.group(2)), _xform(m.group(3)), (_xform(m.group(4)) if m.group(4) else '1')
+            self._emit(f"for {_safe_name(m.group(1))} in range(int({start}), int({stop}) - 1, -int({step})):")
+            self._indent += 1
+            self._block_type_stack.append('loop')
+            if m.group(5): self._transpile_line(m.group(5))
+            return
         m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+?))?\s+DO\b\s*(.*)$', line, re.IGNORECASE)
         if m:
             start, stop, step = _xform(m.group(2)), _xform(m.group(3)), (_xform(m.group(4)) if m.group(4) else '1')
             self._emit(f"for {_safe_name(m.group(1))} in range(int({start}), int({stop}) + 1, int({step})):")
             self._indent += 1
+            self._block_type_stack.append('loop')
             if m.group(5): self._transpile_line(m.group(5))
             return
         m = re.match(r'^WHILE\s+(.+?)\s+DO\b\s*(.*)$', line, re.IGNORECASE)
         if m:
             self._emit(f"while {_xform(m.group(1))}:")
             self._indent += 1
+            self._block_type_stack.append('loop')
             if m.group(2): self._transpile_line(m.group(2))
             return
-        if re.match(r'^REPEAT;?$', line, re.IGNORECASE): self._emit("while True:"); self._indent += 1; return
+        if re.match(r'^REPEAT;?$', line, re.IGNORECASE): self._emit("while True:"); self._indent += 1; self._block_type_stack.append('loop'); return
         m = re.match(r'^UNTIL\s+(.+?);?$', line, re.IGNORECASE)
-        if m: self._emit(f"if {_xform(m.group(1))}: break"); self._indent = max(0, self._indent - 1); return
+        if m:
+            if any(True for _ in [next((l for l in reversed(self._out) if l.strip()), '')]) and next((l for l in reversed(self._out) if l.strip()), '').strip().endswith(':'): self._emit("pass")
+            self._emit(f"if {_xform(m.group(1))}: break")
+            self._indent = max(0, self._indent - 1)
+            if self._block_type_stack: self._block_type_stack.pop()
+            return
         
         m = re.match(r'^IF\s+(.+?)\s+THEN\b\s*(.*)$', line, re.IGNORECASE)
         if m:
@@ -203,6 +231,7 @@ class Transpiler:
             else:
                 self._emit(f"if {_xform(m.group(1))}:")
             self._indent += 1
+            self._block_type_stack.append('if')
             if m.group(2): self._transpile_line(m.group(2))
             return
         m = re.match(r'^IFERR\b\s*(.*)$', line, re.IGNORECASE)
@@ -210,30 +239,51 @@ class Transpiler:
             self._emit("try:")
             self._iferr_stack.append(self._indent)
             self._indent += 1
+            self._block_type_stack.append('try')
             if m.group(1): self._transpile_line(m.group(1))
             return
         m = re.match(r'^THEN\b\s*(.*)$', line, re.IGNORECASE)
         if m:
             if self._iferr_stack and self._iferr_stack[-1] == self._indent - 1:
-                self._indent -= 1; self._emit("except:"); self._indent += 1
+                self._indent -= 1
+                if self._block_type_stack: self._block_type_stack.pop()
+                self._emit("except:")
+                self._indent += 1
+                self._block_type_stack.append('if')
                 if m.group(1): self._transpile_line(m.group(1))
                 return
         m = re.match(r'^ELSE\s+IF\s+(.+?)\s+THEN\b\s*(.*)$', line, re.IGNORECASE)
         if m:
-            self._indent = max(1, self._indent - 1); self._emit(f"elif {_xform(m.group(1))}:")
+            if any(True for _ in [next((l for l in reversed(self._out) if l.strip()), '')]) and next((l for l in reversed(self._out) if l.strip()), '').strip().endswith(':'): self._emit("pass")
+            prev = self._indent
+            self._indent = max(1, self._indent - 1)
+            if self._indent < prev and self._block_type_stack: self._block_type_stack.pop()
+            self._emit(f"elif {_xform(m.group(1))}:")
             self._indent += 1
+            self._block_type_stack.append('if')
             if m.group(2): self._transpile_line(m.group(2))
             return
         m = re.match(r'^ELSE\b\s*(.*)$', line, re.IGNORECASE)
         if m:
-            self._indent = max(1, self._indent - 1); self._emit("else:")
+            if any(True for _ in [next((l for l in reversed(self._out) if l.strip()), '')]) and next((l for l in reversed(self._out) if l.strip()), '').strip().endswith(':'): self._emit("pass")
+            prev = self._indent
+            self._indent = max(1, self._indent - 1)
+            if self._indent < prev and self._block_type_stack: self._block_type_stack.pop()
+            self._emit("else:")
             self._indent += 1
+            self._block_type_stack.append('if')
             if m.group(1): self._transpile_line(m.group(1))
             return
         m = re.match(r'^RETURN\s*(.*?);?$', line, re.IGNORECASE)
         if m: self._emit(f"return {_xform(m.group(1)) if m.group(1) else 'None'}"); return
-        if re.match(r'^BREAK;?$', line, re.IGNORECASE): self._emit("break"); return
-        if re.match(r'^CONTINUE;?$', line, re.IGNORECASE): self._emit("continue"); return
+        if re.match(r'^BREAK;?$', line, re.IGNORECASE): self._emit("break" if 'loop' in self._block_type_stack else "pass"); return
+        if re.match(r'^CONTINUE;?$', line, re.IGNORECASE): self._emit("continue" if 'loop' in self._block_type_stack else "pass"); return
+        # Handle ▶ (STO) operator: expr▶var → var = expr
+        if '▶' in line:
+            m_sto = re.match(r'^(.+?)▶(\w+)\s*;?\s*$', line.strip())
+            if m_sto and m_sto.group(2).upper() not in _PPL_KEYWORDS:
+                self._emit(f"{_safe_name(m_sto.group(2))} = {_xform(m_sto.group(1).strip())}")
+                return
         m = re.match(r'^(.+?)\s*:=\s*(.+?);?$', line)
         if m:
             lhs, rhs = m.group(1).strip(), _xform(m.group(2).strip())

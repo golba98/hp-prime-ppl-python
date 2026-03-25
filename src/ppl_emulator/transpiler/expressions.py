@@ -135,7 +135,7 @@ def _xform(expr):
             e = e.replace('₂', ' ').replace('₁₀', ' ').replace('₁₆', ' ')
             
             # Rename reserved Python names
-            e = re.sub(r'\b(set|list|map|filter|input|type|dir|id|hex|oct|bin|str)\b', 
+            e = re.sub(r'\b(set|list|map|filter|input|type|dir|id|hex|oct|bin|str|yield|lambda|class|del|raise|with|assert|async|await)\b', 
                        lambda m: f"_ppl_{m.group(1).lower()}", e, flags=re.IGNORECASE)
             res.append(e)
     

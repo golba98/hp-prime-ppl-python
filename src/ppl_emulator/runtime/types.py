@@ -1,10 +1,19 @@
 class PPLList(list):
     """1-indexed list for PPL compatibility."""
-    def __call__(self, i):
-        try:
-            return super().__getitem__(int(i) - 1)
-        except (IndexError, TypeError):
-            return 0
+    def __call__(self, *args):
+        if len(args) == 1:
+            try:
+                return super().__getitem__(int(args[0]) - 1)
+            except (IndexError, TypeError):
+                return 0
+        # Multi-dimensional: p(j, k) -> p[j][k]
+        result = self
+        for idx in args:
+            try:
+                result = result[int(idx)]
+            except (IndexError, TypeError):
+                return 0
+        return result
 
     def __getitem__(self, i):
         if isinstance(i, slice):

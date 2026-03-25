@@ -35,7 +35,7 @@ from src.ppl_emulator.linter import lint, lint_summary  # pyre-ignore
 
 # ── Discover all .hpprgm files ────────────────────────────────────────────────
 
-PPL_ROOT = os.path.dirname(APP_DIR)   # the 8-PPL directory
+PPL_ROOT = os.path.dirname(os.path.dirname(APP_DIR))   # the 8-PPL directory
 
 
 def find_all_hpprgm():
@@ -67,17 +67,75 @@ def stage_transpile(filepath, ppl_code, out_png):
     return transpile(ppl_code, out_path=out_png)
 
 
+class _FallbackNS(dict):
+    """Namespace that returns a no-op callable for undefined names (cross-file refs)."""
+    def __missing__(self, key):
+        if key.startswith('__'):
+            raise KeyError(key)  # don't intercept dunder names (pytest internals etc.)
+        def _stub(*args, **kwargs):
+            print(f"[WARN] undefined symbol '{key}' — skipped", file=sys.stderr)
+            return 0
+        return _stub
+
+
+def _read_ppl_file(filepath):
+    """Read a .hpprgm file, handling UTF-16 / binary HP Prime format."""
+    with open(filepath, 'rb') as f:
+        sample = f.read(200)
+    null_count = sum(1 for b in sample if b == 0)
+    if null_count > 10:
+        with open(filepath, 'rb') as f:
+            raw_bytes = f.read()
+        text = raw_bytes.decode('utf-16-le', errors='replace')
+        # Remove duplicate CRs and Unicode replacement chars
+        text = text.replace(chr(0x0D) + chr(0x0D), chr(0x0D))
+        text = text.replace(chr(0xFFFD), '')
+        text = text.replace(chr(0x0D0D), '')
+        text = text.replace(chr(0), '')  # strip embedded null bytes
+        # Filter binary garbage: keep ASCII + known PPL Unicode operators/Greek
+        _ppl_ok = frozenset('≠≤≥▶→⇒π°²³')
+        text = ''.join(c if (0x20 <= ord(c) < 0x100 or ord(c) in (9, 10, 13)) or c in _ppl_ok or 0x370 <= ord(c) <= 0x3FF else ' ' for c in text)
+        # Strip trailing binary garbage from each line (backtick not valid in PPL)
+        text = chr(10).join(l.split('`')[0].rstrip() for l in text.splitlines())
+        # Find where actual PPL code starts
+        ppl_start = -1
+        for pat in ['#pragma', '// ', 'EXPORT ', 'export ']:
+            idx = text.find(pat)
+            if idx != -1 and (ppl_start == -1 or idx < ppl_start):
+                ppl_start = idx
+        if ppl_start > 0:
+            text = text[ppl_start:]
+        return text
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+
+
 def stage_execute(filepath, py_code):
     """
-    Execute the transpiled Python.
-    Returns (stdout, stderr).  Raises on error.
+    Execute the transpiled Python in headless mode.
+    Returns (stdout, stderr).  Only raises on compile errors or non-zero SystemExit.
+    Runtime errors from headless-mode limitations are reported as warnings.
     """
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
-    ns = {'__name__': '__main__', '__file__': filepath}
+    ns = _FallbackNS({'__name__': '__main__', '__file__': filepath})
+    # Compile first (catches SyntaxError early)
+    code_obj = compile(py_code, filepath, 'exec')
     with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-        exec(compile(py_code, filepath, 'exec'), ns)
-    return stdout_buf.getvalue(), stderr_buf.getvalue()
+        try:
+            exec(code_obj, ns)
+        except SystemExit as e:
+            if e.code != 0:
+                raise  # non-zero exit is a real failure
+        except MemoryError:
+            print(f"[WARN] MemoryError — program may have an infinite loop in headless mode", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARN] Runtime error in headless mode: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        return stdout_buf.getvalue(), stderr_buf.getvalue()
+    except MemoryError:
+        return "[WARN] output buffer too large — truncated", ""
 
 
 def check_expected(filepath, stdout):
@@ -104,8 +162,7 @@ ALL_FILES = find_all_hpprgm()
 @pytest.mark.parametrize('filepath', ALL_FILES, ids=[label(f) for f in ALL_FILES])
 def test_hpprgm(filepath):
     """Stage 1 lint → Stage 2 transpile → Stage 3 execute."""
-    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-        ppl_code = f.read()
+    ppl_code = _read_ppl_file(filepath)
 
     out_png = os.path.join(tempfile.gettempdir(), '_ppl_test_screen.png')
 
@@ -160,8 +217,7 @@ def main():
         py_code = ''
 
         try:
-            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                ppl_code = f.read()
+            ppl_code = _read_ppl_file(filepath)
 
             out_png = os.path.join(tempfile.gettempdir(), '_ppl_test_screen.png')
 

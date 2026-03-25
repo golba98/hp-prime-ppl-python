@@ -12,8 +12,12 @@ class HPPrimeRuntime:
         self.img    = Image.new('RGB', (self.width, self.height), (255, 255, 255))
         self.draw   = ImageDraw.Draw(self.img)
         self._getkey_calls = 0
+        self._wait_calls   = 0
         self._input_cancelled = 0
+        self._iskeydown_calls = 0
+        self._choose_calls = 0
         self.CAS    = CASMock()
+        self.Finance = _FinanceMock()
 
     # ── I/O ──────────────────────────────────────────────────────
 
@@ -28,12 +32,22 @@ class HPPrimeRuntime:
         print(f"[INPUT] headless — cancelled")
         return 0
 
-    def CHOOSE(self, title, options):
+    def CHOOSE(self, title, options, *extra):
+        self._choose_calls += 1
+        if self._choose_calls > 20:
+            raise SystemExit(0)
         print(f"[CHOOSE] headless — '{title}' → 1 (first option)")
         return 1
 
     def WAIT(self, t=0):
-        if t > 0: time.sleep(float(t))
+        # In headless mode we never sleep — just count calls.
+        # Return ESC (4) immediately so interactive loops exit on the first call.
+        # After 10 total WAIT calls raise SystemExit(0) as a safety net for
+        # programs that loop without checking the return value.
+        self._wait_calls += 1
+        if self._wait_calls > 10:
+            raise SystemExit(0)
+        return 4  # ESC key — causes UNTIL/IF checks to exit
 
     def GETKEY(self):
         self._getkey_calls += 1
@@ -42,6 +56,9 @@ class HPPrimeRuntime:
         return -1
 
     def ISKEYDOWN(self, key_code):
+        self._iskeydown_calls += 1
+        if self._iskeydown_calls > 30:
+            raise SystemExit(0)
         return True
 
     def SIZE(self, obj):
@@ -180,8 +197,31 @@ class HPPrimeRuntime:
     def MAKELIST(self, expr, var=None, start=1, end=1, step=1):
         return PPLList([0] * (int(end) - int(start) + 1))
 
+    def EVAL(self, x):
+        """Alias for EXPR — evaluates a PPL expression (headless: return as-is)."""
+        try: return float(x)
+        except: return x
+
+    def sto(self, *args):
+        """CAS STO function — no-op in headless mode."""
+        return args[0] if args else 0
+
     # ── Screen save ──────────────────────────────────────────────
 
     def save(self, path='screen.png'):
         self.img.save(path)
         print(f"[EMU] screen → {path}", file=sys.stderr)
+
+class _FinanceMock:
+    """Stub for HP Prime Finance app TVM functions."""
+    def TvmPV(self, *a): return 0.0
+    def TvmFV(self, *a): return 0.0
+    def TvmPMT(self, *a): return 0.0
+    def TvmIPYR(self, *a): return 0.0
+    def TvmNPV(self, *a): return 0.0
+    def TvmIRR(self, *a): return 0.0
+    def TvmN(self, *a): return 0.0
+    def AmortPV(self, *a): return 0.0
+    def AmortFV(self, *a): return 0.0
+    def AmortInt(self, *a): return 0.0
+    def __getattr__(self, name): return lambda *a: 0.0

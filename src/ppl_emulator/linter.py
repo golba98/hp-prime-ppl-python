@@ -54,7 +54,7 @@ BUILTIN_ARGS = {
     # I/O
     'PRINT': (0, 100),
     'MSGBOX': (1, 1),
-    'INPUT': (1, 5),
+    'INPUT': (1, 6),
     'CHOOSE': (2, 100),
     'WAIT': (0, 1),
     'GETKEY': (0, 0),
@@ -117,6 +117,12 @@ _STRUCTURAL: frozenset = frozenset([
     'AND', 'OR', 'NOT', 'MOD', 'DIV', 'XOR',
     'CASE', 'DEFAULT'
 ])
+
+# Contextual keywords valid as variable names (only special inside loop headers)
+_CONTEXTUAL_KEYWORDS: frozenset = frozenset(['FROM', 'TO', 'STEP', 'DO'])
+
+# Keywords truly reserved as assignment targets (cannot be variable names)
+_ASSIGNMENT_RESERVED: frozenset = _STRUCTURAL - _CONTEXTUAL_KEYWORDS
 
 # PPL-specific Unicode operators that are valid on HP Prime (not ASCII errors)
 _PPL_UNICODE_OPS: frozenset = frozenset([
@@ -296,7 +302,7 @@ def _is_valid_lhs(expr: str, line_no: int, issues: List[Issue], source_line: str
 
     # 1. Simple identifier
     if re.match(r'^[A-Za-z_]\w*$', expr):
-        if expr.upper() in _STRUCTURAL:
+        if expr.upper() in _ASSIGNMENT_RESERVED:
              issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — "{expr}" is a reserved keyword.', source_line))
              return False
         return True
@@ -306,7 +312,7 @@ def _is_valid_lhs(expr: str, line_no: int, issues: List[Issue], source_line: str
     m_list = re.match(r'^([A-Za-z_]\w*)\s*[\(\[](.+)[\)\]]$', expr)
     if m_list:
         name = m_list.group(1).upper()
-        if name in _STRUCTURAL:
+        if name in _ASSIGNMENT_RESERVED:
             issues.append(Issue(line_no, 'ERROR', f'Invalid assignment target "{expr}" — "{name}" is a reserved keyword.', source_line))
             return False
         return True
@@ -499,10 +505,9 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         except (UnicodeEncodeError, AttributeError):
             for j, ch in enumerate(safe_text):
                 if ord(ch) > 127 and ch not in _PPL_UNICODE_OPS:
-                    err(i,
-                        f'Non-ASCII character "{ch}" (U+{ord(ch):04X}) — '
-                        f'HP Prime G1 does not support UTF-8. '
-                        f'Replace with ASCII equivalent (e.g. = or -)',
+                    warn(i,
+                        f'Non-ASCII character (U+{ord(ch):04X}) in code — '
+                        f'ensure HP Prime supports this character.',
                         raw.strip())
                     break
 
@@ -680,7 +685,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     found_kw = True
 
                 # ── FOR ───────────────────
-                elif (m_for := re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\s+.+?\s+TO\s+.+?(?:\s+STEP\s+.+?)?\s+DO\b', remaining, re.IGNORECASE)):
+                elif (m_for := re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\s+.+?\s+(?:DOWN)?TO\s+.+?(?:\s+STEP\s+.+?)?\s+DO\b', remaining, re.IGNORECASE)):
                     block_stack.append(('FOR', curr_ln))
                     loop_depth += 1
                     active_for_counters.append(m_for.group(1).upper())
