@@ -2,24 +2,167 @@ import sys
 import math
 import random
 import time
-from PIL import Image, ImageDraw  # type: ignore
-from .types import PPLList, CASMock
+import re
+from PIL import Image, ImageDraw, ImageFont  # type: ignore
+from src.ppl_emulator.runtime.types import PPLList, PPLString, PPLVar, PPLMatrix
+from src.ppl_emulator.transpiler.constants import BUILTINS
+from src.ppl_emulator.runtime.ppl_runtime import CAS, ppl_expr, DET
+
+def _coerce_list(value):
+    if isinstance(value, (PPLList, PPLMatrix, PPLString)):
+        return value
+    if isinstance(value, list):
+        # Discrepancy 1 fix: a Python list-of-lists (i.e. a 2-D structure) becomes a
+        # PPLMatrix so that element assignment is allowed but dimension changes are not.
+        if value and all(isinstance(item, (list, PPLList)) for item in value):
+            return PPLMatrix([[_coerce_list(x) for x in row] for row in value])
+        return PPLList([_coerce_list(item) for item in value])
+    return value
+
+class HP_Grob:
+    def __init__(self, width, height, color=None, runtime=None):
+        self.width = int(width)
+        self.height = int(height)
+        bg = runtime._color(color) if (color is not None and runtime) else (255, 255, 255)
+        self.img = Image.new('RGB', (self.width, self.height), bg)
+        self.draw = ImageDraw.Draw(self.img)
+
+    def clear(self, color, runtime):
+        self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=runtime._color(color))
+
+class PPLError(Exception):
+    def __init__(self, message, line_no=None):
+        super().__init__(message)
+        self.message = message
+        self.line_no = line_no
+
+class ScopeStack:
+    def __init__(self, runtime=None, compiled_mode=False):
+        self.stack = [{}]
+        self.runtime = runtime
+        # Discrepancy 3 fix: when compiled_mode is True (i.e. we are running a compiled
+        # .hpprgm program), referencing an undeclared variable is a hard NameError rather
+        # than silently creating a global initialised to 0.  Interactive/REPL callers
+        # leave compiled_mode=False to preserve the tolerant behaviour.
+        self.compiled_mode = compiled_mode
+
+    def push(self):
+        self.stack.append({})
+
+    def pop(self):
+        if len(self.stack) > 1:
+            self.stack.pop()
+
+    def get(self, name, line_no=None):
+        name = name.upper()
+        for scope in reversed(self.stack):
+            if name in scope:
+                return scope[name]
+        if self.compiled_mode:
+            loc = f" (line {line_no})" if line_no is not None else ""
+            raise NameError(
+                f"Undeclared variable '{name}' referenced{loc}. "
+                "Declare it with LOCAL or assign it before use."
+            )
+        # Interactive / tolerant mode: auto-initialise to 0 in global scope.
+        from src.ppl_emulator.runtime.types import PPLVar
+        new_var = PPLVar(0)
+        self.stack[0][name] = new_var
+        return new_var
+
+    def set(self, name, value, is_local=False):
+        name = name.upper()
+        from src.ppl_emulator.runtime.types import PPLVar, PPLList, PPLString
+
+        if isinstance(value, str) and not isinstance(value, PPLString):
+            value = PPLString(value)
+        if isinstance(value, list) and not isinstance(value, (PPLList, PPLMatrix)):
+            value = _coerce_list(value)
+
+        if is_local:
+            if name in self.stack[-1] and isinstance(self.stack[-1][name], PPLVar):
+                self.stack[-1][name].value = value.value if isinstance(value, PPLVar) else value
+            else:
+                self.stack[-1][name] = value if isinstance(value, PPLVar) else PPLVar(value)
+        else:
+            for scope in reversed(self.stack):
+                if name in scope:
+                    if isinstance(scope[name], PPLVar):
+                        scope[name].value = value.value if isinstance(value, PPLVar) else value
+                    else:
+                        scope[name] = value if isinstance(value, PPLVar) else PPLVar(value)
+                    return
+            self.stack[0][name] = value if isinstance(value, PPLVar) else PPLVar(value)
 
 class HPPrimeRuntime:
-    def __init__(self):
+    _pending_input_queue: list = []
+    # Discrepancy 3: set to True before exec()ing transpiled code to enable strict
+    # compiled-mode variable lookup (undeclared vars raise NameError).
+    # The CLI sets this via HPPrimeRuntime._compiled_mode = True before exec().
+    _compiled_mode: bool = False
+
+    def __init__(self, compiled_mode=None):
         self.width  = 320
         self.height = 240
-        self.img    = Image.new('RGB', (self.width, self.height), (255, 255, 255))
-        self.draw   = ImageDraw.Draw(self.img)
+        self.grobs = [HP_Grob(self.width, self.height, runtime=self)] + [None]*9
+        self.G0 = self.grobs[0]
+        self.img = self.G0.img
+        self.draw = self.G0.draw
         self._getkey_calls = 0
         self._wait_calls   = 0
         self._input_cancelled = 0
         self._iskeydown_calls = 0
         self._choose_calls = 0
-        self.CAS    = CASMock()
+        self._input_queue: list = HPPrimeRuntime._pending_input_queue[:]
+        HPPrimeRuntime._pending_input_queue = []
+        self.CAS    = CAS(self)
         self.Finance = _FinanceMock()
+        self._fn_registry: dict[str, int] = {}
+        # Discrepancy 3: resolve compiled_mode — explicit arg > class flag > default False.
+        if compiled_mode is None:
+            compiled_mode = HPPrimeRuntime._compiled_mode
+        self.scopes = ScopeStack(runtime=self, compiled_mode=compiled_mode)
 
-    # ── I/O ──────────────────────────────────────────────────────
+        for i in range(10):
+            name = f"G{i}"
+            setattr(self, name, self.grobs[i])
+            self.SET_VAR(name, self.grobs[i])
+        
+        for v in ['X', 'Y', 'Z', 'T', 'N', 'K']:
+            self.SET_VAR(v, v)
+
+        self.SET_VAR('PI', math.pi)
+        self.SET_VAR('E', math.e)
+
+    def __getattr__(self, name):
+        name_up = name.upper()
+        if name_up in BUILTINS:
+            def cas_wrapper(*args):
+                return getattr(self.CAS, name.lower())(*args)
+            return cas_wrapper
+        raise AttributeError(f"'HPPrimeRuntime' object has no attribute '{name}'")
+
+    def REGISTER_FN(self, name: str, arity: int):
+        self._fn_registry[name.upper()] = arity
+
+    def CHECK_ARITY(self, name: str, got: int, line_no=None):
+        key = name.upper()
+        if key in self._fn_registry:
+            expected = self._fn_registry[key]
+            if got != expected:
+                raise PPLError(f'Function "{name}" expects {expected} argument(s), got {got}.', line_no)
+
+    def GET_VAR(self, name, line_no=None):
+        return self.scopes.get(name, line_no)
+
+    def SET_VAR(self, name, value, is_local=False):
+        self.scopes.set(name, value, is_local)
+
+    def PUSH_BLOCK(self):
+        self.scopes.push()
+
+    def POP_BLOCK(self):
+        self.scopes.pop()
 
     def PRINT(self, *args):
         print(*(str(a) for a in args))
@@ -28,8 +171,49 @@ class HPPrimeRuntime:
         print(f"[MSGBOX] {msg}")
 
     def INPUT(self, vars_spec, title="", labels=None, help_text=None):
+        label = title if title else (vars_spec if isinstance(vars_spec, str) else "?")
+
+        if self._input_queue:
+            val = self._input_queue.pop(0)
+            print(f"[INPUT] '{label}' <- '{val}'")
+            if isinstance(vars_spec, str):
+                self.SET_VAR(vars_spec, val)
+            return 1
+
+        import os
+        import sys
+        mock_inputs = None
+        if 'MOCK_INPUTS' in os.environ:
+            mock_inputs = os.environ['MOCK_INPUTS'].split(',')
+        if mock_inputs and len(mock_inputs) > 0:
+            val = mock_inputs.pop(0)
+            print(f"[INPUT] headless — mocking '{label}' with '{val}'")
+            if isinstance(vars_spec, str):
+                self.SET_VAR(vars_spec, val)
+            return 1
+
+        if sys.stdin and not sys.stdin.isatty():
+            line = sys.stdin.readline()
+            if line:
+                val = line.strip()
+                print(f"[INPUT] '{label}' (stdin) <- '{val}'")
+                if isinstance(vars_spec, str):
+                    self.SET_VAR(vars_spec, val)
+                return 1
+        
+        if sys.stdin and sys.stdin.isatty():
+            try:
+                val = input(f"[INPUT] {label}: ")
+                if isinstance(vars_spec, str):
+                    self.SET_VAR(vars_spec, val)
+                return 1
+            except (EOFError, KeyboardInterrupt):
+                print()
+
         self._input_cancelled += 1
-        print(f"[INPUT] headless — cancelled")
+        print(f"[INPUT] headless — '{label}' defaulting to \"\"")
+        if isinstance(vars_spec, str):
+            self.SET_VAR(vars_spec, "")
         return 0
 
     def CHOOSE(self, title, options, *extra):
@@ -40,20 +224,26 @@ class HPPrimeRuntime:
         return 1
 
     def WAIT(self, t=0):
-        # In headless mode we never sleep — just count calls.
-        # Return ESC (4) immediately so interactive loops exit on the first call.
-        # After 10 total WAIT calls raise SystemExit(0) as a safety net for
-        # programs that loop without checking the return value.
         self._wait_calls += 1
         if self._wait_calls > 10:
             raise SystemExit(0)
-        return 4  # ESC key — causes UNTIL/IF checks to exit
+        return 4 
+
+    # Maximum GETKEY iterations before auto-sending the ESC keycode (4).
+    # This prevents headless programs from looping forever waiting for input.
+    _GETKEY_MAX_CALLS: int = 30
 
     def GETKEY(self):
         self._getkey_calls += 1
-        if self._getkey_calls >= 1:
-            return 4   # ESC
-        return -1
+        # After the threshold, simulate ESC (keycode 4) so GETKEY-based
+        # event loops exit cleanly without requiring Ctrl+C.
+        if self._getkey_calls > self._GETKEY_MAX_CALLS:
+            return 4   # ESC / exit key on HP Prime
+        # Return -1 (no key) for the first few calls, then start returning 0
+        # so that programs that check k >= 0 see something meaningful.
+        if self._getkey_calls <= 3:
+            return -1
+        return 0
 
     def ISKEYDOWN(self, key_code):
         self._iskeydown_calls += 1
@@ -69,85 +259,170 @@ class HPPrimeRuntime:
 
     def MOUSE(self, idx=0): return PPLList([-1, -1, 0, 0, 0])
 
-    # ── Graphics ─────────────────────────────────────────────────
-
     def _color(self, c):
         if isinstance(c, tuple): return c
-        c = int(c)
+        try: c = int(c)
+        except: return (0, 0, 0)
         return ((c >> 16) & 255, (c >> 8) & 255, c & 255)
 
     def RGB(self, r, g, b, a=255):
         return (int(r) << 16) | (int(g) << 8) | int(b)
 
-    def RECT(self, x1=0, y1=0, x2=319, y2=239, edge_color=(0,0,0), fill_color=(255,255,255)):
-        self.draw.rectangle([x1, y1, x2, y2], fill=self._color(fill_color), outline=self._color(edge_color))
+    def RECT_P(self, *args):
+        if not args:
+            self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
+            return
+        x1, y1 = int(args[0]), int(args[1])
+        x2, y2 = int(args[2]), int(args[3])
+        color = self._color(args[4]) if len(args) > 4 else (0,0,0)
+        fill = self._color(args[5]) if len(args) > 5 else None
+        self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
 
-    def RECT_P(self, x1=0, y1=0, x2=319, y2=239, edge_color=(0,0,0), fill_color=(255,255,255)):
-        self.RECT(x1, y1, x2, y2, edge_color, fill_color)
+    def LINE_P(self, x1, y1, x2, y2, color=0):
+        self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=self._color(color))
 
-    def LINE(self, x1, y1, x2, y2, color=(0,0,0)):
-        self.draw.line([x1, y1, x2, y2], fill=self._color(color))
+    def PIXON_P(self, x, y, color=0):
+        self.draw.point([int(x), int(y)], fill=self._color(color))
 
-    def LINE_P(self, x1, y1, x2, y2, color=(0,0,0)):
-        self.LINE(x1, y1, x2, y2, color)
+    def RECT(self, *args): self.RECT_P(*args)
+    def LINE(self, *args): self.LINE_P(*args)
+    def PIXON(self, *args): self.PIXON_P(*args)
 
-    def PIXON(self, x, y, color=(0,0,0)):
-        self.draw.point([x, y], fill=self._color(color))
+    def FILLCIRCLE_P(self, x, y, r, color=0):
+        x, y, r = int(float(x)), int(float(y)), int(float(r))
+        self.draw.ellipse([x-r, y-r, x+r, y+r], fill=self._color(color), outline=self._color(color))
 
-    def PIXON_P(self, x, y, color=(0,0,0)):
-        self.PIXON(x, y, color)
-
-    def CIRCLE_P(self, x, y, r, color=(0,0,0)):
+    def CIRCLE_P(self, x, y, r, color=0):
+        x, y, r = int(float(x)), int(float(y)), int(float(r))
         self.draw.ellipse([x-r, y-r, x+r, y+r], outline=self._color(color))
 
-    def FILLCIRCLE_P(self, x, y, r, color=(0,0,0)):
-        self.draw.ellipse([x-r, y-r, x+r, y+r], fill=self._color(color))
+    def TEXTOUT_P(self, text, x, y, font=1, color=0, width=320, background=None):
+        x, y = int(float(x)), int(float(y))
+        c = self._color(color)
+        if background is not None:
+            # PPL TEXTOUT_P can have a background color
+            bg = self._color(background)
+            # We don't know the text width easily without font metrics, 
+            # but we can at least draw the text.
+            pass
+        
+        try:
+            # Try to load a font, or use default
+            f = None
+            try:
+                f = ImageFont.load_default()
+            except:
+                pass
+            
+            self.draw.text((x, y), str(text), fill=c, font=f)
+        except Exception as e:
+            # If all else fails, just print to console so we know it's being called
+            print(f"[EMU] TEXTOUT_P fallback: {text} at ({x},{y})")
 
-    def DRAWMENU(self, *args): pass
-    def DISP_FREEZE(self): pass
-    def FREEZE(self): pass
-    def SUBGROB(self, *args): return None
-    def GROB(self, *args): return None
-    def INVERT_P(self, *args): pass
-    def ARC_P(self, *args): pass
-    def TEXTOUT_P(self, *args): pass
-    def BLIT_P(self, *args): pass
+    def INVERT_P(self, x1=0, y1=0, x2=319, y2=239):
+        x1, y1, x2, y2 = int(float(x1)), int(float(y1)), int(float(x2)), int(float(y2))
+        # Ensure bounds are within image and ordered
+        ix1 = max(0, min(x1, x2, self.width - 1))
+        ix2 = max(0, min(max(x1, x2), self.width - 1))
+        iy1 = max(0, min(y1, y2, self.height - 1))
+        iy2 = max(0, min(max(y1, y2), self.height - 1))
+        
+        pixels = self.img.load()
+        for py in range(iy1, iy2 + 1):
+            for px in range(ix1, ix2 + 1):
+                r, g, b = pixels[px, py]
+                pixels[px, py] = (255 - r, 255 - g, 255 - b)
 
-    # ── Math / String ───────────────────────────────────────────
-
-    def IP(self, x): return int(x)
-    def FP(self, x): return x - int(x)
-    def ABS(self, x): return abs(x)
+    def IP(self, x): return int(float(x))
+    def FP(self, x): return float(x) - int(float(x))
+    def ABS(self, x):
+        r = abs(float(x))
+        return int(r) if r.is_integer() else r
     def MAX(self, *args): return max(args)
     def MIN(self, *args): return min(args)
-    def FLOOR(self, x): return math.floor(x)
-    def CEILING(self, x): return math.ceil(x)
-    def ROUND(self, x, n=0): return round(x, n)
-    def SQ(self, x): return x * x
-    def SQRT(self, x): return math.sqrt(x)
-    def LOG(self, x): return math.log10(x)
-    def LN(self, x): return math.log(x)
-    def EXP(self, x): return math.exp(x)
-    def SIN(self, x): return math.sin(math.radians(x))
-    def COS(self, x): return math.cos(math.radians(x))
-    def TAN(self, x): return math.tan(math.radians(x))
+    def FLOOR(self, x): return math.floor(float(x))
+    def CEILING(self, x): return math.ceil(float(x))
+    def ROUND(self, x, n=0):
+        n = int(n)
+        r = round(float(x), n)
+        return int(r) if n == 0 else r
+    def SQ(self, x):
+        r = float(x) * float(x)
+        return int(r) if r.is_integer() else r
+    def SQRT(self, x): return math.sqrt(float(x))
+    def LOG(self, x): return math.log10(float(x))
+    def LN(self, x): return math.log(float(x))
+    def EXP(self, x): return math.exp(float(x))
+    def SIN(self, x): return math.sin(math.radians(float(x)))
+    def COS(self, x): return math.cos(math.radians(float(x)))
+    def TAN(self, x): return math.tan(math.radians(float(x)))
+    def ASIN(self, x): return math.degrees(math.asin(float(x)))
+    def ACOS(self, x): return math.degrees(math.acos(float(x)))
+    def ATAN(self, x): return math.degrees(math.atan(float(x)))
     def IFTE(self, cond, a, b): return a if cond else b
     def RANDOM(self, *args): return random.random()
     def RANDINT(self, a, b): return random.randint(int(a), int(b))
+
+    def INTEGER(self, x): return int(float(x))
+    def REAL(self, x): return float(x)
+    def SIGN(self, x):
+        x = float(x)
+        return 1 if x > 0 else (-1 if x < 0 else 0)
+    def TRUNCATE(self, x, n=0):
+        n = int(n)
+        if n == 0:
+            return math.trunc(float(x))
+        factor = 10**n
+        r = math.trunc(float(x) * factor) / factor
+        return int(r) if r.is_integer() else r
+
+    def ASC(self, s):
+        s = str(s)
+        return ord(s[0]) if s else 0
+    def CHR(self, n): return chr(int(n))
+    def TRIM(self, s): return str(s).strip()
+    def STARTSWITH(self, s, sub): return 1 if str(s).startswith(str(sub)) else 0
+    def ENDSWITH(self, s, sub): return 1 if str(s).endswith(str(sub)) else 0
+    def CONTAINS(self, s, sub): return 1 if str(sub) in str(s) else 0
+
+    def BITSHIFT(self, n, s):
+        n, s = int(n), int(s)
+        if s >= 0: return n << s
+        else: return n >> abs(s)
+
+    def SORT(self, obj):
+        if isinstance(obj, PPLVar): obj = obj.value
+        if isinstance(obj, list):
+            obj.sort()
+        return obj
+
+    def REVERSE(self, obj):
+        if isinstance(obj, PPLVar): obj = obj.value
+        if isinstance(obj, list):
+            return PPLList(reversed(obj))
+        if isinstance(obj, str):
+            return str(obj)[::-1]
+        return obj
+
+    def ADDTAIL(self, obj, val):
+        if isinstance(obj, PPLVar): obj = obj.value
+        if isinstance(obj, list):
+            obj.append(val)
+        return obj
 
     def INSTRING(self, target, pattern, start=1):
         target, pattern = str(target), str(pattern)
         idx = target.find(pattern, int(start) - 1)
         return idx + 1 if idx != -1 else 0
 
-    def LEFT(self, s, n): return str(s)[:int(n)]  # type: ignore
+    def LEFT(self, s, n): return str(s)[:int(n)]
     def RIGHT(self, s, n): 
         s, n = str(s), int(n)
-        return s[-n:] if n > 0 else ""  # type: ignore
+        return s[-n:] if n > 0 else ""
     def MID(self, s, start, length=None):
         s, start = str(s), int(start) - 1
-        if length is None: return s[start:]  # type: ignore
-        return s[start : start + int(length)]  # type: ignore
+        if length is None: return s[start:]
+        return s[start : start + int(length)]
     def CONCAT(self, a, b):
         if isinstance(a, list) and isinstance(b, list):
             return PPLList(list(a) + list(b))
@@ -157,8 +432,7 @@ class HPPrimeRuntime:
     def LOWER(self, s): return str(s).lower()
     def STRING(self, x, precision=None):
         if precision is None: return str(x)
-        try:
-            return format(float(x), f".{int(precision)}g")
+        try: return format(float(x), f".{int(precision)}g")
         except: return str(x)
     def NUM(self, s):
         try: return float(s)
@@ -169,7 +443,8 @@ class HPPrimeRuntime:
     def BITXOR(self, a, b): return int(a) ^ int(b)
     def BITNOT(self, a): return ~int(a)
 
-    # HP Prime: Binary<->Real conversions
+    def MOD(self, a, b): return int(a) % int(b)
+    def DIV(self, a, b): return int(a) // int(b)
     def B_to_R(self, x): return int(x)
     def R_to_B(self, x, bits=32, digits=4): return int(round(float(x)))
 
@@ -180,48 +455,20 @@ class HPPrimeRuntime:
             start, length = int(start_or_old) - 1, int(length_or_new)
             if isinstance(obj, list):
                 res = PPLList(obj)
-                res[start : start + length] = list(replacement)  # type: ignore
+                res[start : start + length] = list(replacement)
                 return res
             else:
                 s = str(obj)
-                return s[:start] + str(replacement) + s[start + length:]  # type: ignore
+                return s[:start] + str(replacement) + s[start + length:]
 
-    def EXPR(self, s):
-        try:
-            return eval(str(s).replace('^', '**'), {"__builtins__": None}, {
-                "math": math, "ABS": abs, "IP": int, "FP": lambda x: x - int(x),
-                "MIN": min, "MAX": max
-            })
-        except: return 0
-
-    def MAKELIST(self, expr, var=None, start=1, end=1, step=1):
-        return PPLList([0] * (int(end) - int(start) + 1))
-
-    def EVAL(self, x):
-        """Alias for EXPR — evaluates a PPL expression (headless: return as-is)."""
-        try: return float(x)
-        except: return x
-
-    def sto(self, *args):
-        """CAS STO function — no-op in headless mode."""
-        return args[0] if args else 0
-
-    # ── Screen save ──────────────────────────────────────────────
+    def EXPR(self, s): return ppl_expr(s)
+    def MAKELIST(self, expr, var=None, start=1, end=1, step=1): return PPLList([0] * (int(end) - int(start) + 1))
+    def EVAL(self, x): return self.EXPR(x)
+    def sto(self, *args): return args[0] if args else 0
 
     def save(self, path='screen.png'):
         self.img.save(path)
         print(f"[EMU] screen → {path}", file=sys.stderr)
 
 class _FinanceMock:
-    """Stub for HP Prime Finance app TVM functions."""
-    def TvmPV(self, *a): return 0.0
-    def TvmFV(self, *a): return 0.0
-    def TvmPMT(self, *a): return 0.0
-    def TvmIPYR(self, *a): return 0.0
-    def TvmNPV(self, *a): return 0.0
-    def TvmIRR(self, *a): return 0.0
-    def TvmN(self, *a): return 0.0
-    def AmortPV(self, *a): return 0.0
-    def AmortFV(self, *a): return 0.0
-    def AmortInt(self, *a): return 0.0
     def __getattr__(self, name): return lambda *a: 0.0

@@ -132,17 +132,6 @@ BUILTIN_ARGS = {
 
 BUILTINS: frozenset = frozenset(BUILTIN_ARGS.keys())
 
-# Valid HP Prime G1/G2 pixel-mode drawing commands (hardware whitelist)
-_GRAPHICS_WHITELIST: frozenset = frozenset([
-    'RECT_P', 'LINE_P', 'TEXTOUT_P', 'PIXON_P', 'PIXOFF_P', 'ARC_P', 'FILLPOLY_P',
-])
-
-# Graphics commands rejected with specific corrective guidance
-_REJECTED_GRAPHICS: dict = {
-    'FILLRECT_P': "Error: Unknown command 'FILLRECT_P'. Use 'RECT_P' with a fill color argument for hardware compatibility.",
-    'FILLRECT':   "Error: Unknown command 'FILLRECT'. Use 'RECT_P' with a fill color argument for hardware compatibility.",
-}
-
 # PPL structural keywords — never callable as user functions
 _STRUCTURAL: frozenset = frozenset([
     'IF', 'THEN', 'ELSE', 'END', 'FOR', 'FROM', 'TO', 'STEP', 'DO',
@@ -665,18 +654,6 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             
             display = proc_lines[curr_ln - 1]
 
-            # ── Missing semicolon ──────────────────────────────────────────────────────────────
-            _SEMI_EXEMPT_KW = frozenset([
-                'FOR', 'IF', 'WHILE', 'IFERR', 'CASE', 'REPEAT', 'SWITCH',
-                'THEN', 'ELSE', 'DO', 'BEGIN', 'END', 'UNTIL', 'DEFAULT',
-                'EXPORT', 'PROCEDURE',
-            ])
-            if not stmt.endswith(';'):
-                _m_fw = re.match(r'^([A-Za-z_]\w*)', bare_clean)
-                _fw = _m_fw.group(1).upper() if _m_fw else ''
-                if _fw not in _SEMI_EXEMPT_KW:
-                    warn(curr_ln, "Missing semicolon at end of statement.", display)
-
             # ── Unreachable code check ────────────────────────────────────────────────────
             if unreachable_flag:
                 # Reset unreachable flag if we've popped out of the block where RETURN happened
@@ -1055,13 +1032,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                             found_kw = True
 
                 if not found_kw:
-                    # Top-level built-in calls are forbidden outside a function body.
-                    # Forward declarations (calls to user-defined functions) are allowed.
-                    if current_fn is None and remaining.strip():
-                        m_top_call = re.match(r'^([A-Za-z_]\w*)\s*\(', remaining)
-                        if m_top_call and m_top_call.group(1).upper() in BUILTIN_ARGS:
-                            err(curr_ln, 'Executable code is strictly forbidden outside a function body.', display)
-                            break  # one error per top-level statement is enough
+                    import sys; print(f"DEBUG: not found_kw, remaining={repr(remaining[:40])}, stack={[(k,l) for k,l in block_stack]}", file=sys.stderr)
                     # Skip past non-keyword expression content to find next structural keyword.
                     # Guard: don't scan past THEN/ELSE/DO/UNTIL (they indicate a special context
                     # like IFERR...THEN where forward scanning would misalign the block stack).
@@ -1126,26 +1097,26 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         used_locals_in_fn.add(tok)
 
                     # Skip structural keywords
-                    if tok in _STRUCTURAL or tok == 'LOCAL' or tok == 'EXPORT' or tok == 'PROCEDURE' or tok == 'BEGIN' or tok == 'END':
+                    if tok in _STRUCTURAL or tok in BUILTINS or tok == 'LOCAL' or tok == 'EXPORT' or tok == 'PROCEDURE' or tok == 'BEGIN' or tok == 'END':
                         continue
 
                     # Skip reserved globals (A-Z, G0-G9, etc.) - legacy PPL uses them
                     if tok in _RESERVED_GLOBALS:
                         continue
 
+
                     if is_call:
-                        # Call check handled in Specific Function Call Analysis below
-                        pass
+                        # ARG count check
+                        if tok in BUILTIN_ARGS:
+                            pass
+                        elif tok in defined_fns:
+                            if tok == cf_up and curr_ln != fn_start_ln:
+                                warn(curr_ln, f"Recursive call to '{gs}' detected. HP Prime has a very shallow stack.", display)
                     else:
                         # Potential implicit global or typo
-                        if tok not in curr_params and tok not in curr_locals and tok not in assigned_vars and tok not in defined_fns and tok not in BUILTIN_ARGS:
+                        if tok not in curr_params and tok not in curr_locals and tok not in assigned_vars and tok not in defined_fns:
                              # warn(curr_ln, f"Variable '{gs}' is used but not declared as LOCAL or parameter. Implicit globals are discouraged.", display)
                              pass
-
-            # ── Color Literal Validation ──────────────────────────────────────
-            # Flag #RRGGBB color literals as Syntax Errors for hardware compatibility
-            for m_hex in re.finditer(r'#([0-9A-Fa-f]{1,6})\b', safe):
-                err(curr_ln, f"Error: Invalid color literal '{m_hex.group(0)}'. Use '0x' prefix for Hex.", display)
 
             # ── Specific Function Call Analysis ───────────────────────────────
             for m_call in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', safe):
@@ -1166,16 +1137,6 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 args_str = "".join([str(c) for c in arg_buf]) # pyre-ignore
                 count = _count_args(args_str)
 
-                # Lowercase PPL keyword used instead of uppercase
-                if fg != func_name and func_name in BUILTIN_ARGS:
-                    err(curr_ln, f"PPL keywords must be UPPERCASE. Use '{func_name}' instead of '{fg}'.", display)
-                    continue
-
-                # Hard-reject: commands with specific corrective guidance
-                if func_name in _REJECTED_GRAPHICS:
-                    err(curr_ln, _REJECTED_GRAPHICS[func_name], display)
-                    continue
-
                 # Built-in check
                 if func_name in BUILTIN_ARGS:
                     min_args, max_args = BUILTIN_ARGS[func_name]
@@ -1192,50 +1153,36 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                             pass # Not a literal float, ignore
                     
                     # Specific Checks: Out of bounds drawing coordinates
-                    if func_name in ['PIXON_P', 'PIXON', 'LINE_P', 'LINE', 'RECT_P', 'RECT', 'FILLRECT_P', 'FILLRECT']:
-                        args_list = [a.strip() for a in args_str.split(',') if a.strip()]
+                    if func_name in ['PIXON_P', 'PIXON', 'LINE_P', 'LINE', 'RECT_P', 'RECT']:
+                        args_list = [a.strip() for a in args_str.split(',')]
                         try:
-                            # HP Prime graphics commands: [Grob,] x, y ...
-                            # If first arg is G0-G9, then x, y are args 1, 2. Else they are 0, 1.
-                            off = 1 if (len(args_list) > 0 and re.match(r'^G\d$', args_list[0].upper())) else 0
-                            if len(args_list) >= (2 + off):
-                                x = int(args_list[off])
-                                y = int(args_list[off+1])
-                                
-                                # Hardware Compatibility Check: Pixel vs logical coordinates
-                                # 320x240 is only valid for _P commands.
-                                is_pixel_cmd = func_name.endswith('_P') or func_name in ['PIXON_P', 'LINE_P', 'RECT_P', 'FILLCIRCLE_P', 'ARC_P', 'TEXTOUT_P', 'BLIT_P', 'FILLPOLY_P', 'TRIANGLE_P', 'DIMGROB_P']
-                                if not is_pixel_cmd:
-                                    if x >= 100 or y >= 100:
-                                         err(curr_ln, f"Error: Hardware compatibility issue. '{fg}' uses logical coordinates (0.0-100.0). Use '{fg}_P' for pixel coordinates (e.g. {x}, {y}).", display)
-
+                            if len(args_list) >= 2:
+                                x = int(args_list[0])
+                                y = int(args_list[1])
                                 # Strict bounds are [0,319]x[0,239]
                                 if x < 0 or x > 319 or y < 0 or y > 239:
                                     warn(curr_ln, f'Hardcoded coordinate ({x}, {y}) is outside the screen bounds (320x240).', display)
                         except ValueError:
                             pass # Not literal ints, ignore
 
-                # Hardware _P whitelist: reject graphics commands that must use the _P (pixel) variant
-                elif func_name in frozenset([
-                    'CIRCLE', 'FILLCIRCLE', 'ARC', 'TEXTOUT',
-                    'FILLPOLY', 'TRIANGLE', 'INVERT', 'DIMGROB',
-                ]):
-                    err(curr_ln, f"Error: Hardware requires pixel-version '{func_name}_P' for this command. Use '{func_name}_P' instead.", display)
+                    # Specific Checks: Output Arguments (CHOOSE, INPUT)
+                    if func_name in ['INPUT', 'CHOOSE'] and current_fn:
+                        cf_up = current_fn.upper()
+                        arg0_match = re.search(r'\b([A-Za-z_]\w*)\b', args_str)
+                        if arg0_match:
+                            v0 = arg0_match.group(1).upper()
+                            assigned_vars_in_fn.add(v0)
+                            if v0 in fn_locals.get(cf_up, set()):
+                                used_locals_in_fn.add(v0)
 
                 # User-defined check
-                elif func_name in defined_fn_args:
+                elif func_name in defined_fn_args and current_fn is not None:
                     expected = defined_fn_args[func_name]
                     if count != expected:
                         err(curr_ln, f'"{fg}" expects {expected} arguments, got {count}', display)
-                
-                # Requirement 1: Unknown function whitelist check
-                elif func_name not in _STRUCTURAL and func_name != 'LOCAL' and func_name != 'EXPORT':
-                    # If it's not a known variable either (from pass 1)
-                    if func_name not in assigned_vars and func_name not in local_vars:
-                        if f"{func_name}_P" in BUILTINS:
-                             err(curr_ln, f"Error: Unknown function '{fg}'. Did you mean '{fg}_P'?", display)
-                        else:
-                             warn(curr_ln, f"Call to unknown function '{fg}'", display)
+                else:
+                    # Unknown or index access
+                    pass
 
     # ── End-of-file: unclosed block checks ───────────────────────────────────
     if block_stack:

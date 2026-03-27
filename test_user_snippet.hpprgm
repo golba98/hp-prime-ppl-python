@@ -1,0 +1,6 @@
+EXPORT Tester()
+BEGIN
+  LOCAL x := 10;
+  LOCAL y := 20;
+  PRINT(x + y);
+END;

@@ -1,0 +1,41 @@
+// @lint-test - intentional error fixture; excluded from integration pipeline
+EXPORT CASE_TEST(val)
+BEGIN
+  CASE
+    IF val == 1 THEN RETURN "One"; END;
+    IF val == 2 THEN 
+      LOCAL temp := 10;
+      RETURN temp * val;
+    END;
+    DEFAULT RETURN "Other";
+  END;
+  PRINT("Unreachable"); // ERROR: This should be flagged
+END;
+
+EXPORT LEX_TEST()
+BEGIN
+  LOCAL b := #1010b;
+  LOCAL h := #AFh;
+  LOCAL bad_hex := #AF;  // ERROR: Missing 'h' suffix
+  PRINT("Line 1 \z Line 2"); // ERROR: Invalid escape '\z'
+END;
+
+EXPORT ARRAY_TEST()
+BEGIN
+  LOCAL list := {1, 2, 3};
+  LOCAL mat := [[1, 2], [3, 4]];
+  
+  list(1) := 10;
+  mat(1, 2) := 5;        // GLITCH: My compiler currently chokes here
+  
+  SIN(45) := 1;          // ERROR: Cannot assign to a function
+  LOCAL list := {0};     // ERROR: Duplicate declaration in same scope
+END;
+
+EXPORT LOOP_TEST()
+BEGIN
+  LOCAL i := 0;
+  REPEAT
+    i := i + 1;
+  // ERROR: Missing 'UNTIL'
+END;

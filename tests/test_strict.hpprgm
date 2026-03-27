@@ -1,0 +1,17 @@
+EXPORT TEST_STRICT()
+BEGIN
+  // 1. Unknown function (FILLRECT instead of RECT_P)
+  FILLRECT(0, 0, 100, 100); 
+
+  // 2. Invalid color literal
+  LOCAL c := #FF0000; 
+
+  // 3. Pixel coordinates with non-pixel command
+  RECT(0, 0, 320, 240); 
+
+  // 4. Corrected RGB/RECT_P
+  RECT_P(0, 0, 319, 239, 0, 0xFF0000); 
+  
+  // 5. Wrong number of arguments for RECT_P (too many)
+  RECT_P(1, 2, 3, 4, 5, 6, 7, 8);
+END;

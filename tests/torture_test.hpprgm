@@ -1,0 +1,27 @@
+// @lint-test - intentional error fixture; excluded from integration pipeline
+EXPORT TORTURE_TEST()
+BEGIN
+  LOCAL x, y, z;
+  LOCAL Ans;          // ERROR 1: Shadowing a reserved System Variable (Ans)
+  
+  x := 10;
+  y := 05;            // ERROR 2: Leading zero (Testing your new Emitter fix)
+  
+  // Logical/Structural Errors
+  5 := z;             // ERROR 3: Invalid Assignment (L-Value must be a variable)
+  
+  IF x > 5 THEN
+    PRINT("High");
+  // ERROR 4: Missing 'END' for the IF block
+  
+  FOR i FROM 1 TO 10 BEGIN   // ERROR 5: Wrong keyword ('BEGIN' instead of 'DO')
+    x := x + i;
+  END;
+
+  // Function Scope Error
+  LOCAL inner_func(a)        // ERROR 6: LOCAL function declared after BEGIN
+  BEGIN
+    RETURN a * 2;
+  END;
+
+END;

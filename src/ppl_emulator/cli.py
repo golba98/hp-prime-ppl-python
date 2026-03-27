@@ -14,6 +14,9 @@ import os
 import argparse
 import traceback
 import re
+import threading
+import time
+import itertools
 
 # Force UTF-8 output so Unicode characters in error messages display correctly
 if hasattr(sys.stdout, 'reconfigure'):
@@ -63,6 +66,46 @@ _W = 64
 
 def _divider(char='-', color=_CLR_GRY):
     print(f"{color}{char * _W}{_CLR_RST}")
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Spinner / loading animation
+# ─────────────────────────────────────────────────────────────────
+
+class _Spinner:
+    """
+    Animated spinner that runs on a background thread while the PPL
+    program executes.  Writes to stderr so it doesn't interleave with
+    PRINT() output on stdout.
+    """
+    # Braille particle frames — gives a smooth "loading" feel
+    _FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+    def __init__(self, label: str = 'running'):
+        self._label  = label
+        self._stop   = threading.Event()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+
+    def _spin(self):
+        frames = itertools.cycle(self._FRAMES)
+        while not self._stop.is_set():
+            frame = next(frames)
+            sys.stderr.write(
+                f'\r  {_CLR_CYN}{frame}{_CLR_RST}  {_CLR_GRY}{self._label}…{_CLR_RST}   '
+            )
+            sys.stderr.flush()
+            time.sleep(0.08)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        # Erase the spinner line completely
+        sys.stderr.write('\r' + ' ' * _W + '\r')
+        sys.stderr.flush()
+
 
 def _find_col(source_line: str, issue_msg: str) -> int:
     """
@@ -267,7 +310,13 @@ Examples:
     parser.add_argument('--dump-python',   action='store_true',  help='Print transpiled Python to stderr')
     parser.add_argument('--no-lint',       action='store_true',  help='Skip linting, run directly')
     parser.add_argument('--warnings-only', action='store_true',  help='Show warnings but do not fail on them')
+    parser.add_argument('--input',         action='append',      help='Provide a value for INPUT() calls in headless mode (can be used multiple times)')
     args = parser.parse_args()
+
+    # ── Populate headless input queue ────────────────────────────
+    if args.input:
+        from src.ppl_emulator.runtime.engine import HPPrimeRuntime
+        HPPrimeRuntime._pending_input_queue = args.input
 
     # ── Read source ──────────────────────────────────────────────
     filename = args.file or '<inline>'
@@ -327,26 +376,58 @@ Examples:
         _divider('=', _CLR_BLU)
 
     # ── Stage 3: Execute ─────────────────────────────────────────
+    from src.ppl_emulator.runtime.engine import HPPrimeRuntime  # pyre-ignore
+    # Enable strict compiled-mode: undeclared variable access raises NameError
+    # rather than silently creating a zero-initialised global (Discrepancy 3 fix).
+    HPPrimeRuntime._compiled_mode = True
     ns = {'__name__': '__main__', '__file__': args.file or '<ppl>'}
+
+    short    = os.path.basename(filename) if filename else 'inline code'
+    out_path = os.path.abspath(args.output)
+
+    print(f"  {_CLR_CYN}{_CLR_BLD}RUNNING{_CLR_RST}  {short}")
+    _divider()
+    print()
+
+    spinner = _Spinner(label=short)
+    spinner.start()
+
     try:
-        short = os.path.basename(filename) if filename else 'inline code'
-        print(f"  {_CLR_CYN}{_CLR_BLD}RUNNING{_CLR_RST}  {short}")
-        print(f"  {_CLR_GRY}(Close the graphics window or press Ctrl+C to stop){_CLR_RST}")
-        _divider()
-        print()
         exec(compile(python_code, '<ppl_transpiled>', 'exec'), ns)
+
         rt = ns.get('_rt')
         if rt and getattr(rt, '_input_cancelled', 0) > 0:
             n = rt._input_cancelled
             print(f"\n  {_CLR_YEL}note:{_CLR_RST} {n} INPUT call(s) were cancelled (headless mode). Results may be empty or default.")
-        pass
-    except KeyboardInterrupt:
-        print(f"\n  {_CLR_YEL}{_CLR_BLD}[STOPPED]{_CLR_RST}  Execution interrupted by user.")
+
+    except (KeyboardInterrupt, SystemExit):
+        pass   # clean stop — still show FINISHED banner
+
     except Exception as e:
+        spinner.stop()   # stop before printing the error block
         _show_runtime_error(filename, e, python_code)
         if args.dump_python:
             traceback.print_exc(file=sys.stderr)
         sys.exit(1)
+
+    finally:
+        spinner.stop()
+        HPPrimeRuntime._compiled_mode = False  # reset for subsequent uses in same process
+
+    # ── FINISHED banner ──────────────────────────────────────────
+    print()
+    _divider('═', _CLR_GRN)
+    print(f"  {_CLR_GRN}{_CLR_BLD}✓  FINISHED{_CLR_RST}  {_CLR_GRY}{short}{_CLR_RST}")
+    _divider('═', _CLR_GRN)
+
+    # ── Output image notice ──────────────────────────────────────
+    if os.path.exists(out_path):
+        size_kb = os.path.getsize(out_path) / 1024
+        print(f"\n  {_CLR_BLU}→  Output image:{_CLR_RST}  {_CLR_BLD}{out_path}{_CLR_RST}")
+        print(f"     {_CLR_GRY}320×240 px  ·  {size_kb:.1f} KB{_CLR_RST}")
+    else:
+        print(f"\n  {_CLR_GRY}(no screen output was written to {out_path}){_CLR_RST}")
+    print()
 
 
 

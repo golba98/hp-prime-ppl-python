@@ -1,0 +1,34 @@
+EXPORT MATH_TEST()
+BEGIN
+  LOCAL my_formula := "X^2 + 5*X";
+  
+  // Symbolic Derivative
+  LOCAL d := CAS.diff(my_formula, "X");
+  PRINT("Derivative: " + d);
+  
+  // Symbolic Integration
+  LOCAL anti := CAS.integrate("X^2", "X");
+  PRINT("Integral of X^2: " + anti);
+
+  // Symbolic Simplification
+  LOCAL simplified := CAS.simplify("(X+1)*(X-1)");
+  PRINT("Simplified (X+1)*(X-1): " + simplified);
+
+  // Evaluation at X=10
+  PRINT("Result at 10: " + EXPR(my_formula, 10));
+  
+  // Fraction Support: 1/3 + 2/3
+  PRINT("1/3 + 2/3 = " + EXPR("1/3 + 2/3"));
+
+  // MATRIX TEST
+  LOCAL m := [[1,2],[3,4]];
+  PRINT("Det(m) = " + DET(m));
+
+  // GRAPHICS TEST (Safe casting)
+  LOCAL px := 160.5;
+  LOCAL py := 120.7;
+  RECT_P(0, 0, 319, 239, #FFFFFF, #FFFFFF); // Clear
+  PIXON_P(px, py, #00FF00); 
+  LINE_P(10.5, 10.5, 50.8, 50.8, #FF0000);
+  PRINT("Graphics test passed (no float crash)");
+END;

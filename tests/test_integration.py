@@ -159,10 +159,17 @@ def check_expected(filepath, stdout):
 ALL_FILES = find_all_hpprgm()
 
 
+def _is_lint_test_fixture(ppl_code):
+    """Return True if file is a lint test fixture that intentionally contains errors."""
+    return '// @lint-test' in ppl_code[:200]
+
+
 @pytest.mark.parametrize('filepath', ALL_FILES, ids=[label(f) for f in ALL_FILES])
 def test_hpprgm(filepath):
     """Stage 1 lint → Stage 2 transpile → Stage 3 execute."""
     ppl_code = _read_ppl_file(filepath)
+    if _is_lint_test_fixture(ppl_code):
+        pytest.skip('Lint test fixture — intentionally contains errors')
 
     out_png = os.path.join(tempfile.gettempdir(), '_ppl_test_screen.png')
 

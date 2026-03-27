@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.ppl_emulator.transpiler import transpile  # pyre-ignore
 from src.ppl_emulator.runtime import HPPrimeRuntime, PPLList  # pyre-ignore
+from src.ppl_emulator.linter import lint  # pyre-ignore
 
 
 # ── Helper ────────────────────────────────────────────────────────
@@ -513,7 +514,303 @@ class TestTranspiler:
         assert "PRINT" in py
 
 
+# ── New Builtins tests ────────────────────────────────────────────
+
+class TestNewBuiltins:
+
+    def test_integer_conversion(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(INTEGER(3.9));
+          PRINT(INTEGER(-3.9));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines[0] == "3"
+        assert lines[1] == "-3"
+
+    def test_real_conversion(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(REAL(3.14));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "3.14" in out
+
+    def test_sign(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(SIGN(5));
+          PRINT(SIGN(0));
+          PRINT(SIGN(-3));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines == ["1", "0", "-1"]
+
+    def test_truncate(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(TRUNCATE(3.789, 2));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "3.78" in out
+
+    def test_asc_chr(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(ASC("A"));
+          PRINT(CHR(65));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines[0] == "65"
+        assert lines[1] == "A"
+
+    def test_trim(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(TRIM("  hello  "));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "hello" in out
+        assert "  hello  " not in out
+
+    def test_startswith_endswith(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(STARTSWITH("hello", "he"));
+          PRINT(ENDSWITH("hello", "lo"));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines == ["1", "1"]
+
+    def test_sort(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL L := {3, 1, 2};
+          SORT(L);
+          PRINT(L(1));
+          PRINT(L(2));
+          PRINT(L(3));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines == ["1", "2", "3"]
+
+    def test_reverse(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL R := REVERSE({1, 2, 3});
+          PRINT(R(1));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "3" in printed_lines(out)
+
+    def test_addtail(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL L := {1, 2};
+          ADDTAIL(L, 99);
+          PRINT(SIZE(L));
+          PRINT(L(3));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines[0] == "3"
+        assert lines[1] == "99"
+
+    def test_bitshift(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(BITSHIFT(1, 3));
+          PRINT(BITSHIFT(8, -2));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        lines = printed_lines(out)
+        assert lines == ["8", "2"]
+
+
+# ── New Graphics tests ────────────────────────────────────────────
+
+class TestNewGraphics:
+
+    def test_textout_renders_pixels(self):
+        """TEXTOUT_P should draw at least one dark pixel in the text region."""
+        code = """
+        EXPORT T()
+        BEGIN
+          RECT();
+          TEXTOUT_P("X", 10, 10, 1, #000000h);
+        END;
+        """
+        _, rt, _ = run_ppl(code)
+        found_dark = False
+        for y in range(10, 26):
+            for x in range(10, 26):
+                px = rt.img.getpixel((x, y))
+                if px == (0, 0, 0):
+                    found_dark = True
+                    break
+        assert found_dark, "TEXTOUT_P did not render any black pixels"
+
+    def test_invert_p(self):
+        """INVERT_P should flip pixel colors."""
+        code = """
+        EXPORT T()
+        BEGIN
+          RECT();
+          INVERT_P(0, 0, 10, 10);
+        END;
+        """
+        _, rt, _ = run_ppl(code)
+        px = rt.img.getpixel((5, 5))
+        assert px == (0, 0, 0), f"Expected black, got {px}"
+
+    def test_arc_p(self):
+        """ARC_P should run without error."""
+        code = """
+        EXPORT T()
+        BEGIN
+          RECT();
+          ARC_P(100, 100, 30, 0, 180, #FF0000h, 1);
+        END;
+        """
+        _, rt, _ = run_ppl(code)
+        assert rt.img.size == (320, 240)
+
+
+# ── New Linter checks tests ───────────────────────────────────────
+
+class TestLinterNewChecks:
+
+    def test_unreachable_after_return(self):
+        code = "EXPORT T() BEGIN RETURN; PRINT(1); END;"
+        issues = lint(code)
+        msgs = [i.message.lower() for i in issues]
+        assert any("unreachable" in m for m in msgs), f"Expected unreachable warning, got: {issues}"
+
+    def test_deep_nesting_warning(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          IF 1 THEN
+            IF 1 THEN
+              IF 1 THEN
+                IF 1 THEN
+                  IF 1 THEN
+                    PRINT(1);
+                  END;
+                END;
+              END;
+            END;
+          END;
+        END;
+        """
+        issues = lint(code)
+        msgs = [i.message.lower() for i in issues]
+        assert any("deeply" in m or "nest" in m or "depth" in m for m in msgs),             f"Expected nesting warning, got: {[i.message for i in issues]}"
+
+
 # ── Run directly ──────────────────────────────────────────────────
+
+
+# ── LOCAL function tests ──────────────────────────────────────────────────────
+
+class TestLocalFunctions:
+
+    def test_local_func_after_export(self):
+        """LOCAL function defined after EXPORT function is callable."""
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(double(5));
+        END;
+
+        LOCAL double(n)
+        BEGIN
+          RETURN n * 2;
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "10" in printed_lines(out)
+
+    def test_local_func_before_export(self):
+        """LOCAL function defined before EXPORT function is callable."""
+        code = """
+        LOCAL triple(n)
+        BEGIN
+          RETURN n * 3;
+        END;
+
+        EXPORT T()
+        BEGIN
+          PRINT(triple(4));
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert "12" in printed_lines(out)
+
+    def test_local_func_no_false_errors(self):
+        """LOCAL function definition must not generate spurious lint errors."""
+        code = """
+        EXPORT MAIN_FUNC()
+        BEGIN
+          PRINT(sub_func(5));
+        END;
+
+        LOCAL sub_func(param)
+        BEGIN
+          RETURN param * 2;
+        END;
+        """
+        issues = lint(code)
+        errors = [i for i in issues if i.severity == "ERROR"]
+        assert not errors, f"Unexpected lint errors: {errors}"
+
+    def test_local_func_param_not_reported_as_unused_local(self):
+        """Parameter of a LOCAL function must not appear as unused local of parent."""
+        code = """
+        EXPORT T()
+        BEGIN
+          PRINT(add(3, 4));
+        END;
+
+        LOCAL add(a, b)
+        BEGIN
+          RETURN a + b;
+        END;
+        """
+        issues = lint(code)
+        param_warnings = [i for i in issues if "unused" in i.message.lower() and
+                          ("'A'" in i.message or "'B'" in i.message)]
+        assert not param_warnings, f"False unused-param warnings: {param_warnings}"
+        out, _, _ = run_ppl(code)
+        assert "7" in printed_lines(out)
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
