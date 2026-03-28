@@ -69,7 +69,7 @@ BUILTINS = frozenset([
     'LOCAL', 'EXPORT', 'PROCEDURE', 'BEGIN', 'RETURN', 'IFERR',
 ])
 
-BUILTINS_ZERO_ARGS = frozenset(['GETKEY', 'RECT', 'RECT_P', 'WAIT', 'MOUSE', 'FREEZE', 'DRAWMENU', 'DISP_FREEZE'])
+BUILTINS_ZERO_ARGS = frozenset(['GETKEY', 'RECT', 'RECT_P', 'MOUSE', 'FREEZE', 'DRAWMENU', 'DISP_FREEZE'])
 
 _STRUCTURAL = frozenset([
     # Block structure

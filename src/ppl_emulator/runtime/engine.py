@@ -459,6 +459,10 @@ class HPPrimeRuntime:
     def GETKEY(self):
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
+            # Yield 5 ms to the OS so tight key-polling loops don't pin a CPU
+            # core at 100%.  At 5 ms/call the effective poll rate is ~200 Hz —
+            # fast enough to feel instantaneous to any human interaction.
+            pygame.time.wait(5)
         self._getkey_calls += 1
         # After the threshold, simulate ESC (keycode 4) so GETKEY-based
         # event loops exit cleanly without requiring Ctrl+C.
@@ -473,6 +477,9 @@ class HPPrimeRuntime:
     def ISKEYDOWN(self, key_code):
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
+            # 1 ms yield — shorter than GETKEY since ISKEYDOWN is called inside
+            # animation loops that also do other work per frame.
+            pygame.time.wait(1)
         self._iskeydown_calls += 1
         if not self._pg_enabled and self._iskeydown_calls > 30:
             raise SystemExit(0)
@@ -522,7 +529,8 @@ class HPPrimeRuntime:
         if not args:
             if self._pg_enabled and pygame is not None:
                 self._pg_screen.fill((255, 255, 255))
-            self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
+            else:
+                self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
             return
         x1, y1 = int(args[0]), int(args[1])
         x2, y2 = int(args[2]), int(args[3])
@@ -535,7 +543,8 @@ class HPPrimeRuntime:
             if fill is not None:
                 pygame.draw.rect(self._pg_screen, fill, (left, top, w, h), 0)
             pygame.draw.rect(self._pg_screen, color, (left, top, w, h), 1)
-        self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
+        else:
+            self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
 
     def LINE_P(self, x1, y1, x2, y2, color=0):
         self.screen_is_dirty = True
@@ -545,7 +554,8 @@ class HPPrimeRuntime:
             pygame.draw.line(
                 self._pg_screen, c, (int(x1), int(y1)), (int(x2), int(y2)), 1
             )
-        self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=c)
+        else:
+            self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=c)
 
     def PIXON_P(self, x, y, color=0):
         self.screen_is_dirty = True
@@ -553,7 +563,8 @@ class HPPrimeRuntime:
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             self._pg_screen.set_at((int(x), int(y)), c)
-        self.draw.point([int(x), int(y)], fill=c)
+        else:
+            self.draw.point([int(x), int(y)], fill=c)
 
     def RECT(self, *args): self.RECT_P(*args)
     def LINE(self, *args): self.LINE_P(*args)
@@ -566,7 +577,8 @@ class HPPrimeRuntime:
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             pygame.draw.circle(self._pg_screen, c, (x, y), r, 0)
-        self.draw.ellipse([x-r, y-r, x+r, y+r], fill=c, outline=c)
+        else:
+            self.draw.ellipse([x-r, y-r, x+r, y+r], fill=c, outline=c)
 
     def CIRCLE_P(self, x, y, r, color=0):
         self.screen_is_dirty = True
@@ -575,16 +587,16 @@ class HPPrimeRuntime:
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             pygame.draw.circle(self._pg_screen, c, (x, y), r, 1)
-        self.draw.ellipse([x-r, y-r, x+r, y+r], outline=c)
+        else:
+            self.draw.ellipse([x-r, y-r, x+r, y+r], outline=c)
 
     def TEXTOUT_P(self, text, x, y, font=1, color=0, width=320, background=None):
         self.screen_is_dirty = True
         x, y = int(float(x)), int(float(y))
         c = self._color(color)
-        self.draw.text((x, y), str(text), fill=c, font=ImageFont.load_default())
-        self.draw.point((x, y), fill=c)
-        # Note: background colour fill is not implemented (no font metrics to measure width).
         if self._pg_enabled and pygame is not None:
+            # Live window: render via pygame font — higher quality than Pillow's
+            # load_default() and already reflected in the PNG via pygame.image.save().
             try:
                 self._pg_pump()
                 size = max(8, int(float(font)))
@@ -595,6 +607,10 @@ class HPPrimeRuntime:
                 self._pg_screen.blit(surf, (x, y))
             except Exception:
                 pass
+        else:
+            # Headless: write to Pillow buffer for PNG export.
+            self.draw.text((x, y), str(text), fill=c, font=ImageFont.load_default())
+            self.draw.point((x, y), fill=c)
 
     def INVERT_P(self, x1=0, y1=0, x2=319, y2=239):
         self.screen_is_dirty = True
@@ -611,11 +627,12 @@ class HPPrimeRuntime:
                 for px in range(ix1, ix2 + 1):
                     r, g, b, _ = self._pg_screen.get_at((px, py))
                     self._pg_screen.set_at((px, py), (255 - r, 255 - g, 255 - b))
-        pixels = self.img.load()
-        for py in range(iy1, iy2 + 1):
-            for px in range(ix1, ix2 + 1):
-                r, g, b = pixels[px, py]
-                pixels[px, py] = (255 - r, 255 - g, 255 - b)
+        else:
+            pixels = self.img.load()
+            for py in range(iy1, iy2 + 1):
+                for px in range(ix1, ix2 + 1):
+                    r, g, b = pixels[px, py]
+                    pixels[px, py] = (255 - r, 255 - g, 255 - b)
 
     # ── Math ─────────────────────────────────────────────────────────
 
