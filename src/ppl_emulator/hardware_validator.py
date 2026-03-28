@@ -90,16 +90,21 @@ class HardwareIssue:
 
 
 def _strip_strings(text):
+    """Replace the contents of string literals with spaces so regex
+    patterns never accidentally match text inside quoted strings.
+    Handles PPL double-escaped quotes (two consecutive double-quotes).
+    """
     result = list(text)
     in_str = False
     i = 0
     while i < len(text):
         ch = text[i]
-        if ch == chr(34):
+        if ch == '"':  # quote character
             if not in_str:
                 in_str = True
             else:
-                if i + 1 < len(text) and text[i + 1] == chr(34):
+                # Check for PPL escaped quote: ""
+                if i + 1 < len(text) and text[i + 1] == '"':
                     result[i] = result[i + 1] = " "
                     i += 2
                     continue
@@ -112,11 +117,12 @@ def _strip_strings(text):
 
 
 def _strip_comment(line):
+    """Remove a PPL // line comment, leaving string literals intact."""
     in_str = False
     i = 0
     while i < len(line):
         ch = line[i]
-        if ch == chr(34):
+        if ch == '"':
             in_str = not in_str
         elif not in_str and ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
             return line[:i]
@@ -125,6 +131,7 @@ def _strip_comment(line):
 
 
 def _count_args(args_str):
+    """Count top-level comma-separated arguments in an argument string."""
     s = args_str.strip()
     if not s:
         return 0
@@ -132,7 +139,7 @@ def _count_args(args_str):
     in_str = False
     count = 1
     for ch in s:
-        if ch == chr(34):
+        if ch == '"':
             in_str = not in_str
         elif not in_str:
             if ch in "([{":
@@ -145,6 +152,7 @@ def _count_args(args_str):
 
 
 def _collect_user_functions(code):
+    """Scan for EXPORT/PROCEDURE function declarations and return their names (uppercase)."""
     names = set()
     for line in code.splitlines():
         stripped = _strip_comment(line).strip()
@@ -169,9 +177,9 @@ def hardware_validate(code):
             issues.append(HardwareIssue(
                 severity="ERROR",
                 message=(
-                    "Invalid color literal " + chr(39) + "#" + hex_val + chr(39) + ". "
-                    "Use " + chr(39) + "0x" + chr(39) + " prefix for hex colors on HP Prime "
-                    "hardware (e.g. 0x" + hex_val.upper() + ")"
+                    f"Invalid color literal '#{hex_val}'. "
+                    f"Use '0x' prefix for hex colors on HP Prime hardware "
+                    f"(e.g. 0x{hex_val.upper()})"
                 ),
                 line_no=line_no,
             ))
@@ -189,13 +197,13 @@ def hardware_validate(code):
                 if fn_name in _SUGGESTIONS:
                     issues.append(HardwareIssue(
                         severity="ERROR",
-                        message="Unknown function " + chr(39) + m.group(1) + chr(39) + ". Did you mean " + chr(39) + _SUGGESTIONS[fn_name] + chr(39) + "?",
+                        message=f"Unknown function '{m.group(1)}'. Did you mean '{_SUGGESTIONS[fn_name]}'?",
                         line_no=line_no,
                     ))
                 else:
                     issues.append(HardwareIssue(
                         severity="ERROR",
-                        message="Unknown function " + chr(39) + m.group(1) + chr(39) + " is not a valid HP Prime G1/G2 built-in",
+                        message=f"Unknown function '{m.group(1)}' is not a valid HP Prime G1/G2 built-in",
                         line_no=line_no,
                     ))
                 continue
@@ -205,20 +213,21 @@ def hardware_validate(code):
                 pixel_v = _HAS_PIXEL_VARIANT[fn_name]
                 issues.append(HardwareIssue(
                     severity="WARNING",
-                    message=chr(39) + m.group(1) + chr(39) + " uses screen coordinates. Consider " + chr(39) + pixel_v + chr(39) + " for pixel-exact rendering on hardware",
+                    message=f"'{m.group(1)}' uses screen coordinates. Consider '{pixel_v}' for pixel-exact rendering on hardware",
                     line_no=line_no,
                 ))
 
             # 3: argument count validation
             call_start = m.end()
+            # Walk forward past the argument list to find the closing paren
             depth = 1
-            in_s = False
+            in_string = False
             i = call_start
             while i < len(clean) and depth > 0:
                 ch = clean[i]
-                if ch == chr(34):
-                    in_s = not in_s
-                elif not in_s:
+                if ch == '"':
+                    in_string = not in_string
+                elif not in_string:
                     if ch == "(":
                         depth += 1
                     elif ch == ")":
@@ -237,7 +246,7 @@ def hardware_validate(code):
                         expected = str(min_a) + "-" + str(max_a)
                     issues.append(HardwareIssue(
                         severity="ERROR",
-                        message="Wrong number of arguments for " + chr(39) + m.group(1) + chr(39) + ": got " + str(nargs) + ", expected " + expected,
+                        message=f"Wrong number of arguments for '{m.group(1)}': got {nargs}, expected {expected}",
                         line_no=line_no,
                     ))
 

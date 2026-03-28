@@ -1,4 +1,9 @@
 class PPLVar:
+    """Boxed PPL variable — wraps any value so it can be passed by reference.
+
+    All math, comparison, iteration, and indexing operations delegate to
+    ``self.value``, so callers rarely need to unwrap it manually.
+    """
     def __init__(self, value):
         self.value = value
     def __repr__(self):
@@ -41,6 +46,8 @@ class PPLVar:
         self.value[i] = val
 
     def __call__(self, *args, **kwargs):
+        # Allow boxed callables (e.g. a PPLList stored in a var) to be called directly.
+        # If the underlying value isn't callable, return it as-is rather than crashing.
         try:
             return self.value(*args, **kwargs)
         except TypeError:
@@ -232,14 +239,53 @@ class PPLMatrix:
     def __hash__(self):
         return hash(tuple(tuple(row) for row in self._data))
 
+    def __mul__(self, other):
+        """Matrix multiplication (dot product) or scalar multiplication."""
+        # Scalar multiplication
+        if isinstance(other, (int, float)):
+            new_data = [[cell * other for cell in row] for row in self._data]
+            return PPLMatrix(new_data)
+
+        # Matrix multiplication (Dot Product)
+        if isinstance(other, PPLMatrix):
+            if self._cols != other._rows:
+                raise ValueError(
+                    f"Dimension mismatch: Cannot multiply ({self._rows}x{self._cols}) "
+                    f"by ({other._rows}x{other._cols})"
+                )
+
+            # Standard dot product implementation
+            result = [[0 for _ in range(other._cols)] for _ in range(self._rows)]
+            for i in range(self._rows):
+                for j in range(other._cols):
+                    dot_product = 0
+                    for k in range(self._cols):
+                        dot_product += self._data[i][k] * other._data[k][j]
+                    result[i][j] = dot_product
+            return PPLMatrix(result)
+
+        return NotImplemented
+
+    def __rmul__(self, other):
+        """Commutative scalar multiplication (scalar * matrix)."""
+        return self.__mul__(other)
+
 
 class CASMock:
+    """Stub CAS object — used when SymPy is unavailable or a real CAS call is not needed.
+
+    All methods return a harmless default (0.5 for scalars, empty list for collections).
+    """
+
     def __call__(self, cmd):
         return 0.5
+
     def LambertW(self, z, k=0):
         return 0.5
+
     def solve(self, *args):
         return PPLList([])
+
     def __getattr__(self, name):
         return lambda *args, **kwargs: PPLList([])
 
@@ -275,9 +321,9 @@ class PPLString:
     def __eq__(self, other):
         return self.data == str(other)
 
-    def __lt__(self, other): return self.data < str(other)
+    def __lt__(self, other): return self.data <  str(other)
     def __le__(self, other): return self.data <= str(other)
-    def __gt__(self, other): return self.data > str(other)
+    def __gt__(self, other): return self.data >  str(other)
     def __ge__(self, other): return self.data >= str(other)
 
     def __getitem__(self, i):
@@ -298,12 +344,12 @@ class PPLString:
             idx = int(i) - 1  # 1-based
             if idx < 0:
                 return
-            l = list(self.data)
-            while len(l) <= idx:
-                l.append(" ")
+            chars = list(self.data)
+            while len(chars) <= idx:
+                chars.append(" ")   # pad with spaces if index is beyond current length
             v_str = str(val)
-            l[idx] = v_str[0] if v_str else " "
-            self.data = "".join(l)
+            chars[idx] = v_str[0] if v_str else " "
+            self.data = "".join(chars)
         except (ValueError, TypeError):
             pass
 

@@ -355,9 +355,11 @@ Examples:
             sys.exit(1)   # stop here — don't run broken code
 
     # ── Stage 2: Transpile ───────────────────────────────────────
+    # Resolve output path relative to the current working directory.
+    out_path = os.path.abspath(args.output)
     from src.ppl_emulator.transpiler.core import transpile  # pyre-ignore
     try:
-        python_code = transpile(ppl_code, out_path=args.output)
+        python_code = transpile(ppl_code, out_path=out_path)
     except Exception as e:
         print(f'  {_CLR_RED}{_CLR_BLD}transpile error:{_CLR_RST} {os.path.basename(filename)}')
         print(f'     {_CLR_BLU}-->{_CLR_RST} {_CLR_GRY}{filename}{_CLR_RST}')
@@ -383,7 +385,6 @@ Examples:
     ns = {'__name__': '__main__', '__file__': args.file or '<ppl>'}
 
     short    = os.path.basename(filename) if filename else 'inline code'
-    out_path = os.path.abspath(args.output)
 
     print(f"  {_CLR_CYN}{_CLR_BLD}RUNNING{_CLR_RST}  {short}")
     _divider()
@@ -421,13 +422,35 @@ Examples:
     _divider('═', _CLR_GRN)
 
     # ── Output image notice ──────────────────────────────────────
-    if os.path.exists(out_path):
+    rt = ns.get('_rt')
+    # Force a save to the resolved output path if graphics were drawn.
+    if rt is not None and getattr(rt, "screen_is_dirty", False):
+        try:
+            rt.save(out_path)
+        except Exception:
+            pass
+    saved_path = None
+    if rt is not None and hasattr(rt, "_last_saved_path"):
+        saved_path = rt._last_saved_path
+    if saved_path and os.path.exists(saved_path):
+        size_kb = os.path.getsize(saved_path) / 1024
+        print(f"\n  {_CLR_BLU}→  Output image:{_CLR_RST}  {_CLR_BLD}{saved_path}{_CLR_RST}")
+        print(f"     {_CLR_GRY}320×240 px  ·  {size_kb:.1f} KB{_CLR_RST}")
+    elif os.path.exists(out_path):
         size_kb = os.path.getsize(out_path) / 1024
         print(f"\n  {_CLR_BLU}→  Output image:{_CLR_RST}  {_CLR_BLD}{out_path}{_CLR_RST}")
         print(f"     {_CLR_GRY}320×240 px  ·  {size_kb:.1f} KB{_CLR_RST}")
     else:
-        print(f"\n  {_CLR_GRY}(no screen output was written to {out_path}){_CLR_RST}")
+        # No graphics were emitted; stay silent.
+        pass
     print()
+
+    # Clean up pygame if it was used.
+    if rt is not None and hasattr(rt, "close"):
+        try:
+            rt.close()
+        except Exception:
+            pass
 
 
 

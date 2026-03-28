@@ -7,9 +7,10 @@ from .constants import _OPS, _PYTHON_RESERVED, BUILTINS, _STRUCTURAL, BUILTINS_Z
 
 # Python class names emitted by _xform itself (e.g. {..} -> PPLList([..])).
 # These must not be treated as PPL variable references in repl_var.
-_XFORM_TYPES = frozenset(['PPLLIST', 'PPLSTRING'])
+_XFORM_TYPES = frozenset(['PPLLIST', 'PPLSTRING', 'COERCE'])
 
 def _safe_name(name):
+    """Prefix Python reserved words with '_ppl_' to avoid syntax errors."""
     if name.lower() in _PYTHON_RESERVED:
         return f"_ppl_{name.lower()}"
     return name
@@ -19,32 +20,60 @@ def _escape_content(s):
     return s.replace('\\', '\\\\').replace('"', '\\"')
 
 def _strip_comment(line: str) -> str:
+    """Remove a PPL // line comment, leaving string literals intact."""
     buf: list[str] = []
-    in_str: bool = False
-    i: int = 0
+    in_str = False
+    i = 0
     while i < len(line):
-        if line[i] == '"':
-            if not in_str: in_str = True; buf.append('"')
-            elif i + 1 < len(line) and line[i+1] == '"': buf.append('""'); i += 1
-            else: in_str = False; buf.append('"')
-        elif in_str and str(line)[i] == '\\' and i + 1 < len(line) and line[i+1] == '"':
-            buf.append('\\"'); i += 1
-        elif str(line)[i:i+2] == '//' and not in_str: break  # type: ignore
-        else: buf.append(line[i])
+        ch = line[i]
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                buf.append('"')
+            elif i + 1 < len(line) and line[i + 1] == '"':
+                buf.append('""')
+                i += 1      # consume the second quote of ""
+            else:
+                in_str = False
+                buf.append('"')
+        elif in_str and ch == '\\' and i + 1 < len(line) and line[i + 1] == '"':
+            buf.append('\\"')
+            i += 1
+        elif ch == '/' and line[i:i+2] == '//' and not in_str:
+            break   # start of line comment — discard the rest
+        else:
+            buf.append(ch)
         i += 1
     return ''.join(buf).rstrip()
 
 def _erase_strings(line):
-    res, in_str, i = [], False, 0
+    """Replace string literal content with spaces (keeps delimiters).
+
+    Used for bracket-depth counting so characters inside strings don't
+    count as real parentheses or operators.
+    """
+    res = []
+    in_str = False
+    i = 0
     while i < len(line):
-        if line[i] == '"':
-            if not in_str: in_str = True; res.append('"')
-            elif i + 1 < len(line) and line[i+1] == '"': res.append('  '); i += 1
-            else: in_str = False; res.append('"')
-        elif in_str and line[i] == '\\' and i + 1 < len(line) and line[i+1] == '"':
-            res.append('  '); i += 1
-        elif in_str: res.append(' ')
-        else: res.append(line[i])
+        ch = line[i]
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                res.append('"')
+            elif i + 1 < len(line) and line[i + 1] == '"':
+                res.append('  ')  # escaped quote inside string — erase both chars
+                i += 1
+            else:
+                in_str = False
+                res.append('"')
+        elif in_str and ch == '\\' and i + 1 < len(line) and line[i + 1] == '"':
+            res.append('  ')  # \" escape — erase both chars
+            i += 1
+        elif in_str:
+            res.append(' ')   # inside string — replace with space
+        else:
+            res.append(ch)
         i += 1
     return ''.join(res)
 
@@ -54,12 +83,16 @@ def _split_locals(text):
     while i < len(text):
         ch = text[i]
         if ch == '"':
-            if not in_s: in_s = True; cur.append('"')
+            if not in_s:
+                in_s = True
+                cur.append('"')
             else:
-                if i + 1 < len(text) and text[i+1] == '"':
-                    cur.append('""'); i += 1
+                if i + 1 < len(text) and text[i + 1] == '"':
+                    cur.append('""')
+                    i += 1
                 else:
-                    in_s = False; cur.append('"')
+                    in_s = False
+                    cur.append('"')
         elif not in_s and ch in '{[(':
             depth += 1
             cur.append(ch)
@@ -67,7 +100,8 @@ def _split_locals(text):
             depth -= 1
             cur.append(ch)
         elif not in_s and ch == ',' and depth == 0:
-            parts.append(''.join(cur).strip()); cur = []
+            parts.append(''.join(cur).strip())
+            cur = []
         else:
             cur.append(ch)
         i += 1
@@ -101,20 +135,28 @@ def _xform(expr, line_no=None, known_vars=None):
         ch = expr[i]
         if ch == '"':
             if not in_str:
-                if buf: parts.append(('code', ''.join(buf))); buf = []
-                in_str = True; buf.append('"')
+                if buf:
+                    parts.append(('code', ''.join(buf)))
+                    buf = []
+                in_str = True
+                buf.append('"')
             else:
-                if i + 1 < len(expr) and expr[i+1] == '"':
-                    buf.append('""'); i += 1
+                if i + 1 < len(expr) and expr[i + 1] == '"':
+                    buf.append('""')
+                    i += 1  # consume second quote of escaped ""
                 else:
-                    buf.append('"'); in_str = False
-                    parts.append(('str', ''.join(buf))); buf = []
-        elif in_str and ch == '\\' and i + 1 < len(expr) and expr[i+1] == '"':
-            buf.append('\\"'); i += 1
+                    buf.append('"')
+                    in_str = False
+                    parts.append(('str', ''.join(buf)))
+                    buf = []
+        elif in_str and ch == '\\' and i + 1 < len(expr) and expr[i + 1] == '"':
+            buf.append('\\"')
+            i += 1
         else:
             buf.append(ch)
         i += 1
-    if buf: parts.append(('code', ''.join(buf)))
+    if buf:
+        parts.append(('code', ''.join(buf)))
 
     res: list[str] = []
     for kind, val in parts:
@@ -124,8 +166,11 @@ def _xform(expr, line_no=None, known_vars=None):
             res.append(f'PPLString("{_escape_content(content)}")')  # type: ignore
         else:
             e = val
-            # { } -> PPLList([ ])
-            e = e.replace('{', 'PPLList([').replace('}', '])')
+            # { } or [ ] -> COERCE([ ])
+            e = e.replace('{', 'COERCE([').replace('}', '])')
+            # Only match brackets if they are not preceded by an identifier (indexing)
+            e = re.sub(r'(?<![A-Za-z0-9_])\[', 'COERCE([', e)
+            e = re.sub(r'\](?![0-9A-Za-z_\[])', '])', e)
             
             # Color literals
             # Strip leading zeros from plain decimal literals (e.g., 05 -> 5)
@@ -162,9 +207,8 @@ def _xform(expr, line_no=None, known_vars=None):
                 name_up = name.upper()
                 if name_up in BUILTINS or name_up in _STRUCTURAL: return m.group(0)
                 
-                # If it's a known local/global variable, treat it as list/string indexing
-                # If not sure, we use parentheses so it remains a call (PPLList/PPLString __call__ will handle it)
-                # But Task 2 says "it must emit m[r-1][c-1]", so we prioritize [] for likely vars.
+                # Known variables use bracket indexing so PPLList/PPLMatrix.__getitem__ handles 1-based.
+                # Unknown identifiers keep parens and remain as function calls.
                 safe = _safe_name(name)
                 args_str = m.group(2)
                 
@@ -177,8 +221,10 @@ def _xform(expr, line_no=None, known_vars=None):
                         # Two ranges: m(1:2, 2:3) -> _ppl_slice_2d(m, 0, 2, 1, 3)
                         r = args[0].split(':', 1)
                         c_arg = args[1].split(':', 1)
-                        r0 = _slice_bound(r[0], True);  r1 = _slice_bound(r[1], False)
-                        c0 = _slice_bound(c_arg[0], True);  c1 = _slice_bound(c_arg[1], False)
+                        r0 = _slice_bound(r[0], True)
+                        r1 = _slice_bound(r[1], False)
+                        c0 = _slice_bound(c_arg[0], True)
+                        c1 = _slice_bound(c_arg[1], False)
                         return f'_ppl_slice_2d({safe}, {r0}, {r1}, {c0}, {c1})'
                 
                 if known_vars is not None and name_up in known_vars:

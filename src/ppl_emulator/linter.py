@@ -376,10 +376,13 @@ def _count_args(args_str: str) -> int:
     depth: int = 0
     commas: int = 0
     for ch in safe:
-        if ch in '([{': depth += 1  # pyre-ignore
-        elif ch in ')]}': depth -= 1  # pyre-ignore
-        elif ch == ',' and depth == 0: commas += 1  # pyre-ignore
-    return commas + 1  # pyre-ignore
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}' :
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            commas += 1
+    return commas + 1
 
 
 # ── Main linter ───────────────────────────────────────────────────────────────
@@ -608,47 +611,61 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             stmt_start_ln = i
             
         stmt_buf.append(line_clean)
-        cb = " ".join(stmt_buf)
-        sf = _erase_strings(cb)
+        # Join buffered lines into one combined statement string
+        combined_stmt = " ".join(stmt_buf)
+        # Erase string contents so quoted brackets don't affect balance counts
+        erased_stmt = _erase_strings(combined_stmt)
         
-        # Balance check
-        pb = sf.count('(') - sf.count(')')
-        bb = sf.count('{') - sf.count('}')
+        # Balance check — keep accumulating if the statement is not yet complete
+        paren_balance = erased_stmt.count('(') - erased_stmt.count(')')
+        brace_balance = erased_stmt.count('{') - erased_stmt.count('}')
         trailing_op = bool(re.search(
-            r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*$', sf, re.IGNORECASE))
-        if pb > 0 or bb > 0 or cb.endswith(',') or cb.endswith(':=') or trailing_op:
+            r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*$', erased_stmt, re.IGNORECASE))
+        if paren_balance > 0 or brace_balance > 0 or combined_stmt.endswith(',') or combined_stmt.endswith(':=') or trailing_op:
             continue
             
         # We have a complete (at least one) statement structure.
         # Now split by semicolon, but NOT inside strings or nested blocks.
         # Actually, if we just split by ';' using a simple loop that ignores strings.
-        full_cb = cb
-        stmt_buf = [] # Reset for next
-        
-        # Split into individual statements
+        full_stmt = combined_stmt
+        stmt_buf = []  # Reset buffer for the next statement
+
+        # Split the combined string into semicolon-delimited statements,
+        # being careful not to split on semicolons inside string literals.
         stmts: List[str] = []
-        sbuf: List[str] = []
-        in_s = False
+        tok_buf: List[str] = []
+        in_string = False
         j = 0
-        while j < len(full_cb):
-            ch = full_cb[j]
+        while j < len(full_stmt):
+            ch = full_stmt[j]
             if ch == '"':
-                if not in_s: in_s = True; sbuf.append('"')
+                if not in_string:
+                    in_string = True
+                    tok_buf.append('"')
                 else:
-                    if j + 1 < len(full_cb) and full_cb[j+1] == '"':
-                        sbuf.append('""'); j += 1
-                    else: in_s = False; sbuf.append('"')
-            elif in_s and ch == '\\' and j + 1 < len(full_cb) and full_cb[j+1] == '"':
-                sbuf.append('\\"'); j += 1
-            elif ch == ';' and not in_s:
-                s = ''.join(sbuf).strip()
-                if s: stmts.append(s + ';') # Keep ; for endswith check
-                sbuf = []
+                    # Check for PPL-style escaped quote: ""
+                    if j + 1 < len(full_stmt) and full_stmt[j+1] == '"':
+                        tok_buf.append('""')
+                        j += 1
+                    else:
+                        in_string = False
+                        tok_buf.append('"')
+            elif in_string and ch == '\\' and j + 1 < len(full_stmt) and full_stmt[j+1] == '"':
+                # Backslash-escaped quote inside a string: \"
+                tok_buf.append('\\"')
+                j += 1
+            elif ch == ';' and not in_string:
+                # Semicolon terminates a statement
+                s = ''.join(tok_buf).strip()
+                if s:
+                    stmts.append(s + ';')  # keep semicolon for endswith check
+                tok_buf = []
             else:
-                sbuf.append(ch)
+                tok_buf.append(ch)
             j += 1
-        last = ''.join(sbuf).strip()
-        if last: stmts.append(last)
+        last = ''.join(tok_buf).strip()
+        if last:
+            stmts.append(last)
         
         for stmt_idx, stmt in enumerate(stmts):
             # i_stmt is the line number where the statement ends (approx)
@@ -852,7 +869,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 # ── WHILE (malformed) ───────────────────
                 elif re.match(r'^WHILE\b', remaining, re.IGNORECASE):
                     err(curr_ln, "Malformed WHILE loop — expected 'WHILE condition DO'.", display)
-                    block_stack.append(('WHILE', curr_ln)); loop_depth += 1
+                    block_stack.append(('WHILE', curr_ln))
+                    loop_depth += 1
                     remaining = re.sub(r'^WHILE\b', '', remaining, count=1, flags=re.IGNORECASE).strip()
                     found_kw = True
 
@@ -916,13 +934,15 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
 
                 # ── CASE / DEFAULT ───────────────────
                 elif (m_case := re.match(r'^CASE\b', remaining, re.IGNORECASE)):
-                    block_stack.append(('CASE', curr_ln)); case_default_stack.append(False)
+                    block_stack.append(('CASE', curr_ln))
+                    case_default_stack.append(False)
                     remaining = remaining[m_case.end():].strip()
                     found_kw = True
                 elif (m_default := re.match(r'^DEFAULT\b', remaining, re.IGNORECASE)):
-                    if case_default_stack: 
+                    if case_default_stack:
                         cast(List[bool], case_default_stack)[-1] = True
-                    else: err(curr_ln, 'DEFAULT outside of a CASE block', display)
+                    else:
+                        err(curr_ln, 'DEFAULT outside of a CASE block', display)
                     remaining = remaining[m_default.end():].strip()
                     found_kw = True
 
@@ -1043,9 +1063,11 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                             for mv in re.finditer(r'\b([A-Za-z_]\w*)\b', dp):
                                 v = mv.group(1).upper()
                                 if (v in BUILTINS or v in _STRUCTURAL) and v not in _warned_shadows:
-                                    _warned_shadows.add(v); warn(curr_ln, f'Shadowing keyword "{v}"', display)
+                                    _warned_shadows.add(v)
+                                    warn(curr_ln, f'Shadowing keyword "{v}"', display)
                                 if v in _RESERVED_GLOBALS and v not in _warned_shadows:
-                                    _warned_shadows.add(v); warn(curr_ln, f'Shadowing global "{v}"', display)
+                                    _warned_shadows.add(v)
+                                    warn(curr_ln, f'Shadowing global "{v}"', display)
                                 if current_fn:
                                     if v in declared_in_fn_pass2 and v not in _warned_shadows:
                                         warn(curr_ln, f'Duplicate declaration of LOCAL variable "{mv.group(1)}" in the same scope.', display)
@@ -1159,9 +1181,12 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 k = start_idx
                 while k < len(safe) and p_depth > 0:
                     ch = safe[k]
-                    if ch == '(': p_depth += 1
-                    elif ch == ')': p_depth -= 1
-                    if p_depth > 0: arg_buf.append(ch)
+                    if ch == '(':
+                        p_depth += 1
+                    elif ch == ')':
+                        p_depth -= 1
+                    if p_depth > 0:
+                        arg_buf.append(ch)
                     k += 1
                 args_str = "".join([str(c) for c in arg_buf]) # pyre-ignore
                 count = _count_args(args_str)

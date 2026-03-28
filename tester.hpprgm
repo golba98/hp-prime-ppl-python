@@ -1,0 +1,60 @@
+EXPORT BounceTest()
+BEGIN
+  LOCAL x, y, dx, dy, frames, maxFrames;
+  LOCAL screenW, screenH, ballSize;
+  
+  // 1. Initial State
+  x := 10;
+  y := 50;
+  dx := 15; // X Velocity
+  dy := 9;  // Y Velocity
+  
+  ballSize := 20;
+  screenW := 320;
+  screenH := 240;
+  
+  frames := 0;
+  maxFrames := 40; // Run for 40 frames so it doesn't loop forever
+  
+  // 2. The Animation Loop
+  WHILE frames < maxFrames DO
+    // Clear the previous frame
+    RECT(); 
+    
+    // Apply velocity to position
+    x := x + dx;
+    y := y + dy;
+    
+    // 3. Collision Detection (Screen boundaries)
+    // If it hits a wall, invert the velocity to "bounce"
+    IF x <= 0 THEN 
+      dx := ABS(dx); 
+    END;
+    
+    IF x >= (screenW - ballSize) THEN 
+      dx := -1 * ABS(dx); 
+    END;
+    
+    IF y <= 0 THEN 
+      dy := ABS(dy); 
+    END;
+    
+    IF y >= (screenH - ballSize) THEN 
+      dy := -1 * ABS(dy); 
+    END;
+    
+    // 4. Draw the ball at the new coordinates (Using a Red Square)
+    RECT_P(x, y, x + ballSize, y + ballSize, RGB(0, 0, 0), RGB(255, 0, 0));
+    
+    // 5. Sleep for a fraction of a second to create a framerate
+    // Note: If your WAIT only accepts integers, this might round to 0!
+    WAIT(0.05); 
+    
+    frames := frames + 1;
+  END;
+  
+  // 6. Final State Output
+  TEXTOUT_P("Animation Complete!", 90, 110, 2, RGB(0, 0, 255));
+  
+  RETURN frames;
+END;

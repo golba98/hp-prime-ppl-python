@@ -1,0 +1,7 @@
+EXPORT tester()
+BEGIN
+  LOCAL M1 := [[1, 2], [3, 4]];
+  LOCAL M2 := [[2, 0], [1, 2]];
+  LOCAL M3 := M1 * M2;
+  PRINT(M3);
+END;
