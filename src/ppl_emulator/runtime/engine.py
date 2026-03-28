@@ -384,6 +384,141 @@ class HPPrimeRuntime:
             self.close()
             raise SystemExit(0)
 
+    # ── Dialog helpers ───────────────────────────────────────────────
+
+    def _dlg_font(self, size=15):
+        try:
+            return pygame.font.SysFont("segoeui,arial,sans-serif", size)
+        except Exception:
+            return pygame.font.Font(None, size + 2)
+
+    def _render_dialog_on_window(self, lines, title=None, footer=None, input_text=None):
+        """Draw a modal dialog directly on the pygame window surface (above the bezel).
+
+        Calls _present_display() first so the HP Prime content is visible behind
+        the semi-transparent shade, then overlays the dialog box.  Flips at the end.
+        Does nothing in headless (no pygame) mode.
+        """
+        if not self._pg_enabled or pygame is None or self._pg_window is None:
+            return
+        self._present_display()  # draw current content + bezel into window
+        ww, wh = self._pg_window.get_size()
+
+        # Semi-transparent darkening shade over the whole window
+        shade = pygame.Surface((ww, wh), pygame.SRCALPHA)
+        shade.fill((0, 0, 0, 160))
+        self._pg_window.blit(shade, (0, 0))
+
+        # Dialog box geometry
+        dlg_w = min(ww - 60, 420)
+        dlg_h = min(wh - 60, 320)
+        dlg_x = (ww - dlg_w) // 2
+        dlg_y = (wh - dlg_h) // 2
+
+        BG      = (22, 25, 35)
+        BORDER  = (0, 113, 197)
+        TITLE_C = (0, 160, 230)
+        TEXT_C  = (210, 218, 228)
+        HINT_C  = (100, 110, 130)
+        FIELD_BG = (38, 42, 56)
+
+        pygame.draw.rect(self._pg_window, BG,     (dlg_x, dlg_y, dlg_w, dlg_h), border_radius=10)
+        pygame.draw.rect(self._pg_window, BORDER, (dlg_x, dlg_y, dlg_w, dlg_h), width=2, border_radius=10)
+
+        font = self._dlg_font(15)
+        small = self._dlg_font(12)
+        lh = font.get_linesize() + 3
+        y = dlg_y + 12
+
+        if title:
+            ts = font.render(str(title), True, TITLE_C)
+            self._pg_window.blit(ts, (dlg_x + 12, y))
+            y += lh
+            pygame.draw.line(self._pg_window, BORDER,
+                             (dlg_x + 6, y), (dlg_x + dlg_w - 6, y))
+            y += 8
+
+        for line in lines:
+            ls = font.render(str(line), True, TEXT_C)
+            self._pg_window.blit(ls, (dlg_x + 12, y))
+            y += lh
+            if y > dlg_y + dlg_h - lh * 2:
+                break  # clip if too many lines
+
+        if input_text is not None:
+            fld_y = dlg_y + dlg_h - lh - 28
+            pygame.draw.rect(self._pg_window, FIELD_BG,
+                             (dlg_x + 12, fld_y, dlg_w - 24, lh + 6), border_radius=4)
+            pygame.draw.rect(self._pg_window, BORDER,
+                             (dlg_x + 12, fld_y, dlg_w - 24, lh + 6), width=1, border_radius=4)
+            cursor = '|' if (pygame.time.get_ticks() // 500) % 2 == 0 else ' '
+            isurf = font.render(input_text + cursor, True, (255, 255, 255))
+            self._pg_window.blit(isurf, (dlg_x + 16, fld_y + 3))
+
+        if footer:
+            fs = small.render(str(footer), True, HINT_C)
+            self._pg_window.blit(fs, (dlg_x + 12, dlg_y + dlg_h - small.get_linesize() - 8))
+
+        pygame.display.flip()
+
+    def _pg_input_dialog(self, label):
+        """Show a text-input dialog on the pygame window. Returns typed string."""
+        typed = ''
+        while True:
+            self._render_dialog_on_window(
+                [],
+                title=label,
+                footer="Enter → confirm   ESC → cancel",
+                input_text=typed,
+            )
+            pygame.time.wait(16)
+            self._pg_pump()
+            for event in pygame.event.get([pygame.KEYDOWN, pygame.QUIT]):
+                if event.type == pygame.QUIT:
+                    raise SystemExit(0)
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN:
+                        return typed
+                    elif event.key == pygame.K_ESCAPE:
+                        return ''
+                    elif event.key == pygame.K_BACKSPACE:
+                        typed = typed[:-1]
+                    elif event.unicode and event.unicode.isprintable():
+                        typed += event.unicode
+
+    def _pg_choose_dialog(self, title, options):
+        """Show a numbered-list CHOOSE dialog on the pygame window. Returns 1-based index."""
+        selected = 0  # 0-based cursor
+        n = len(options)
+        while True:
+            rows = []
+            for i, opt in enumerate(options):
+                prefix = '▶ ' if i == selected else '  '
+                rows.append(f"{prefix}{i + 1}.  {opt}")
+            self._render_dialog_on_window(
+                rows,
+                title=title,
+                footer="↑ ↓ to navigate   Enter / 1–9 to choose   ESC = cancel",
+            )
+            pygame.time.wait(16)
+            self._pg_pump()
+            for event in pygame.event.get([pygame.KEYDOWN, pygame.QUIT]):
+                if event.type == pygame.QUIT:
+                    raise SystemExit(0)
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_UP:
+                        selected = (selected - 1) % n
+                    elif event.key == pygame.K_DOWN:
+                        selected = (selected + 1) % n
+                    elif event.key == pygame.K_RETURN:
+                        return selected + 1
+                    elif event.key == pygame.K_ESCAPE:
+                        return 0
+                    elif pygame.K_1 <= event.key <= pygame.K_9:
+                        idx = event.key - pygame.K_0
+                        if 1 <= idx <= n:
+                            return idx
+
     # ── Output ───────────────────────────────────────────────────────
 
     def PRINT(self, *args):
@@ -397,6 +532,15 @@ class HPPrimeRuntime:
                 self._render_terminal()
                 self._present_display()
                 pygame.display.flip()
+
+    def DISP(self, text='', row=None):
+        """HP Prime DISP — show text on the home screen, optionally at a specific row.
+
+        Behaves like PRINT: feeds into the terminal buffer and renders on screen.
+        The optional row argument is accepted for compatibility but is ignored in
+        the emulator (the terminal buffer scrolls naturally).
+        """
+        self.PRINT(text)
 
     def _render_terminal(self):
         """Draw all buffered PRINT lines onto the 320×240 _pg_screen.
@@ -473,32 +617,52 @@ class HPPrimeRuntime:
     def INPUT(self, vars_spec, title="", labels=None, help_text=None):
         label = title if title else (vars_spec if isinstance(vars_spec, str) else "?")
 
+        # 1. Pre-queued values (from --input flag)
         if self._input_queue:
             val = self._input_queue.pop(0)
-            print(f"[INPUT] '{label}' <- '{val}'")
+            msg = f"[INPUT] '{label}' ← '{val}'"
+            print(msg)
+            self._terminal_lines.append(msg)
             if isinstance(vars_spec, str):
                 self.SET_VAR(vars_spec, val)
             return 1
 
-        mock_inputs = None
+        # 2. MOCK_INPUTS environment variable
         if 'MOCK_INPUTS' in os.environ:
-            mock_inputs = os.environ['MOCK_INPUTS'].split(',')
-        if mock_inputs and len(mock_inputs) > 0:
-            val = mock_inputs.pop(0)
-            print(f"[INPUT] headless — mocking '{label}' with '{val}'")
+            mock = os.environ['MOCK_INPUTS'].split(',')
+            if mock:
+                val = mock.pop(0)
+                os.environ['MOCK_INPUTS'] = ','.join(mock)
+                msg = f"[INPUT] mocked '{label}' ← '{val}'"
+                print(msg)
+                self._terminal_lines.append(msg)
+                if isinstance(vars_spec, str):
+                    self.SET_VAR(vars_spec, val)
+                return 1
+
+        # 3. Live pygame window — show on-screen input dialog
+        if self._pg_enabled and pygame is not None:
+            val = self._pg_input_dialog(str(label))
+            msg = f"[INPUT] '{label}' ← '{val}'"
+            print(msg)
+            self._terminal_lines.append(msg)
             if isinstance(vars_spec, str):
                 self.SET_VAR(vars_spec, val)
-            return 1
+            return 1 if val != '' else 0
 
+        # 4. Piped stdin
         if sys.stdin and not sys.stdin.isatty():
             line = sys.stdin.readline()
             if line:
                 val = line.strip()
-                print(f"[INPUT] '{label}' (stdin) <- '{val}'")
+                msg = f"[INPUT] '{label}' (stdin) ← '{val}'"
+                print(msg)
+                self._terminal_lines.append(msg)
                 if isinstance(vars_spec, str):
                     self.SET_VAR(vars_spec, val)
                 return 1
-        
+
+        # 5. Interactive terminal
         if sys.stdin and sys.stdin.isatty():
             try:
                 val = input(f"[INPUT] {label}: ")
@@ -508,8 +672,11 @@ class HPPrimeRuntime:
             except (EOFError, KeyboardInterrupt):
                 print()
 
+        # 6. Headless fallback
         self._input_cancelled += 1
-        print(f"[INPUT] headless — '{label}' defaulting to \"\"")
+        msg = f"[INPUT] headless — '{label}' defaulting to \"\""
+        print(msg)
+        self._terminal_lines.append(msg)
         if isinstance(vars_spec, str):
             self.SET_VAR(vars_spec, "")
         return 0
@@ -518,7 +685,21 @@ class HPPrimeRuntime:
         self._choose_calls += 1
         if not self._pg_enabled and self._choose_calls > 20:
             raise SystemExit(0)
-        print(f"[CHOOSE] headless — '{title}' → 1 (first option)")
+
+        # Flatten options into a plain list of strings
+        all_opts: list = []
+        for item in ([options] + list(extra)):
+            if hasattr(item, '__iter__') and not isinstance(item, str):
+                all_opts.extend(str(x) for x in item)
+            elif item is not None:
+                all_opts.append(str(item))
+
+        if self._pg_enabled and pygame is not None:
+            return self._pg_choose_dialog(str(title), all_opts)
+
+        msg = f"[CHOOSE] headless — '{title}' → 1 (first option)"
+        print(msg)
+        self._terminal_lines.append(msg)
         return 1
 
     def WAIT(self, t=0):
@@ -542,6 +723,71 @@ class HPPrimeRuntime:
         if delay > 0:
             time.sleep(delay)
         return 4 
+
+    def FREEZE(self):
+        """Flush the current screen content to the live window and hold it."""
+        if self._pg_enabled and pygame is not None:
+            self._present_display()
+            pygame.display.flip()
+            pygame.event.pump()
+
+    def DISP_FREEZE(self):
+        """Alias for FREEZE — present current display."""
+        self.FREEZE()
+
+    def DRAWMENU(self, *labels):
+        """Draw an HP Prime-style F1–F6 menu bar at the bottom of the screen.
+
+        Each positional argument is the label for the next soft-key button.
+        Empty string hides that slot.  Labels are rendered in a dark bar with
+        HP blue borders, mirroring the real calculator's bottom menu strip.
+        """
+        self.screen_is_dirty = True
+        self._graphics_mode = True
+        n_slots = 6
+        slot_w  = self.width  // n_slots   # 320 / 6 ≈ 53 px per slot
+        bar_h   = 16
+        bar_y   = self.height - bar_h      # 240 - 16 = 224
+
+        # ── Pillow ──────────────────────────────────────────────────
+        from PIL import ImageFont as _IF
+        _bar_fill = (30, 35, 50)
+        _border   = (0, 113, 197)
+        _text_c   = (200, 210, 220)
+        self.draw.rectangle([0, bar_y, self.width - 1, self.height - 1], fill=_bar_fill)
+        self.draw.line([0, bar_y, self.width - 1, bar_y], fill=_border, width=1)
+        _fnt = _IF.load_default()
+        for i in range(n_slots):
+            label = str(labels[i]) if i < len(labels) else ''
+            if label:
+                tx = i * slot_w + 2
+                self.draw.text((tx, bar_y + 2), label, fill=_text_c, font=_fnt)
+            if i > 0:
+                self.draw.line([i * slot_w, bar_y, i * slot_w, self.height - 1],
+                               fill=_border, width=1)
+
+        # ── pygame ───────────────────────────────────────────────────
+        if self._pg_enabled and pygame is not None and self._pg_screen is not None:
+            self._pg_pump()
+            _pg_bar_fill = (30, 35, 50)
+            _pg_border   = (0, 113, 197)
+            _pg_text_c   = (200, 210, 220)
+            pygame.draw.rect(self._pg_screen, _pg_bar_fill,
+                             (0, bar_y, self.width, bar_h))
+            pygame.draw.line(self._pg_screen, _pg_border,
+                             (0, bar_y), (self.width - 1, bar_y), 1)
+            try:
+                _sfont = pygame.font.SysFont("consolas,monospace", 11)
+            except Exception:
+                _sfont = pygame.font.Font(None, 13)
+            for i in range(n_slots):
+                label = str(labels[i]) if i < len(labels) else ''
+                if label:
+                    ts = _sfont.render(label, True, _pg_text_c)
+                    self._pg_screen.blit(ts, (i * slot_w + 2, bar_y + 2))
+                if i > 0:
+                    pygame.draw.line(self._pg_screen, _pg_border,
+                                     (i * slot_w, bar_y), (i * slot_w, self.height - 1), 1)
 
     # Maximum GETKEY iterations before auto-sending the ESC keycode (4).
     # This prevents headless programs from looping forever waiting for input.
