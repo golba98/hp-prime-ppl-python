@@ -155,6 +155,11 @@ class HPPrimeRuntime:
     _compiled_mode: bool = False
     # CLI --args values fed into the EXPORT function's default call.
     _entry_args: list = []
+    # Print output routing: 'both' | 'screen' | 'terminal'
+    # 'screen'   → PRINT renders on pygame display only (silent terminal)
+    # 'terminal' → PRINT goes to stdout only (no pygame text rendering)
+    # 'both'     → PRINT does both (default)
+    _print_mode: str = 'both'
 
     def __init__(self, compiled_mode=None):
         self.width  = 320
@@ -383,12 +388,15 @@ class HPPrimeRuntime:
 
     def PRINT(self, *args):
         text = ' '.join(str(a) for a in args)
-        print(text)
+        mode = HPPrimeRuntime._print_mode
+        if mode in ('both', 'terminal'):
+            print(text)
         self._terminal_lines.append(text)
-        if self._pg_enabled and pygame is not None and self._pg_screen is not None:
-            self._render_terminal()
-            self._present_display()
-            pygame.display.flip()
+        if mode in ('both', 'screen'):
+            if self._pg_enabled and pygame is not None and self._pg_screen is not None:
+                self._render_terminal()
+                self._present_display()
+                pygame.display.flip()
 
     def _render_terminal(self):
         """Draw all buffered PRINT lines onto the 320×240 _pg_screen.
@@ -438,12 +446,15 @@ class HPPrimeRuntime:
 
     def MSGBOX(self, msg):
         text = f"[MSG] {msg}"
-        print(text)
+        mode = HPPrimeRuntime._print_mode
+        if mode in ('both', 'terminal'):
+            print(text)
         self._terminal_lines.append(text)
-        if self._pg_enabled and pygame is not None and self._pg_screen is not None:
-            self._render_terminal()
-            self._present_display()
-            pygame.display.flip()
+        if mode in ('both', 'screen'):
+            if self._pg_enabled and pygame is not None and self._pg_screen is not None:
+                self._render_terminal()
+                self._present_display()
+                pygame.display.flip()
 
     def _get_entry_arg(self, idx: int):
         """Return the idx-th CLI --args value, coerced to int/float/str, defaulting to 0."""

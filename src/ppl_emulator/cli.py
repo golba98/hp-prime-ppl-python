@@ -313,6 +313,11 @@ Examples:
     parser.add_argument('--warnings-only', action='store_true',  help='Show warnings but do not fail on them')
     parser.add_argument('--input',         action='append',      help='Provide a value for INPUT() calls in headless mode (can be used multiple times)')
     parser.add_argument('--args',          default='',           help='Comma-separated arguments for the EXPORT function (e.g. --args "50" or --args "50,100")')
+    parser.add_argument('--print-mode',   default='both',       choices=['screen', 'terminal', 'both'],
+                        help='Where PRINT() output appears: '
+                             '"screen" = HP Prime display only (Option A), '
+                             '"terminal" = stdout only, graphics on screen (Option B), '
+                             '"both" = screen + terminal (default)')
     args = parser.parse_args()
 
     # ── Populate headless input queue ────────────────────────────
@@ -324,6 +329,10 @@ Examples:
     if args.args:
         from src.ppl_emulator.runtime.engine import HPPrimeRuntime
         HPPrimeRuntime._entry_args = [a.strip() for a in args.args.split(',') if a.strip()]
+
+    # ── Set PRINT output routing ──────────────────────────────────
+    from src.ppl_emulator.runtime.engine import HPPrimeRuntime
+    HPPrimeRuntime._print_mode = getattr(args, 'print_mode', 'both')
 
     # ── Read source ──────────────────────────────────────────────
     filename = args.file or '<inline>'
@@ -414,6 +423,7 @@ Examples:
         HPPrimeRuntime._compiled_mode = False  # reset for subsequent uses in same process
         HPPrimeRuntime._force_save_output_default = False
         HPPrimeRuntime._entry_args = []
+        HPPrimeRuntime._print_mode = 'both'
 
     # ── FINISHED banner ──────────────────────────────────────────
     print()

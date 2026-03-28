@@ -2,120 +2,153 @@
 
 ![HP Prime Screen Render](screen.png)
 
-Transpiles and runs HP Prime PPL (`.hpprgm`) code locally so you can test before pushing to your HP Prime G1.
+Transpiles and runs HP Prime PPL (`.hpprgm`) programs locally in Python.
+Pipeline: **Lint → Transpile → Execute** — graphical output renders in a live pygame window (320×240).
 
-## 🚀 Examples
+---
 
-Check out the `examples/` directory for cool programs to run:
-- **`FIREWORKS.hpprgm`**: Dynamic graphical firework display.
-- **`test_draw.hpprgm`**: Comprehensive graphics function test.
+## 🚀 Quick start
 
-To run an example:
 ```powershell
 ppl examples/FIREWORKS.hpprgm
 ```
 
 ---
 
-## One-time setup — add this folder to your PATH
+## One-time setup — add `0-App` to your PATH
 
-This lets you run `ppl` and `test` from **any project folder** without typing the full path.
+This lets you type `ppl` from **any project folder**.
 
-1. **Locate this folder** (where `run_ppl.py` is stored).
-2. **Add to PATH**:
-   - **Windows**: Search for "Edit the system environment variables" → Environment Variables → Path → Edit → New → [Paste folder path].
-   - **macOS/Linux**: Add `export PATH="$PATH:/path/to/this/folder"` to your `~/.zshrc` or `~/.bashrc`.
-3. **Restart your terminal.**
+1. Copy the full path to `0-App\` (e.g. `C:\Users\you\Desktop\8-PPL\0-App`).
+2. **Windows**: Search "Edit the system environment variables" → Environment Variables → Path → Edit → New → paste the path.
+3. Restart your terminal.
 
-After setup you can run from any subfolder like `1-Binary Search Tree Visualizer\`:
+After setup, run from any subfolder (e.g. `27-Tester\`):
 
 ```powershell
-ppl BSTVisualizer.hpprgm
-test
+ppl tester.hpprgm
 ```
 
 ---
 
-## Run a single PPL file
+## Running a file
 
-From inside a project folder (after PATH setup):
 ```powershell
 ppl <file.hpprgm>
 ```
 
-Without PATH setup (from project folder):
-```powershell
-py "../0-App/run_ppl.py" <file.hpprgm>
-```
+Pass arguments to the exported function:
 
-From the `0-App` folder directly:
 ```powershell
-py run_ppl.py <file.hpprgm>
+ppl tester.hpprgm --args "50"
+ppl solver.hpprgm --args "100,200"
 ```
 
 ---
 
-## Common flags
+## PRINT output mode
+
+Choose where `PRINT()` (and `MSGBOX()`) output appears using `--print-mode`:
+
+| Mode | Flag | PRINT goes to… | Graphics go to… |
+|------|------|----------------|-----------------|
+| **A — Screen only** | `--print-mode screen` | HP Prime display (pygame window) | HP Prime display |
+| **B — Terminal** | `--print-mode terminal` | Terminal / stdout | HP Prime display |
+| **Both** *(default)* | *(omit flag)* | Terminal **and** HP Prime display | HP Prime display |
+
+### Option A — Screen only
+
+`PRINT` output appears on the HP Prime display, just like the real calculator's Home view.
+Nothing is printed to the terminal.
+
+```powershell
+ppl tester.hpprgm --args "50" --print-mode screen
+```
+
+### Option B — Terminal
+
+Graphics render on the HP Prime display as normal.
+`PRINT` output goes to the terminal / stdout only — nothing is drawn on the screen.
+Useful for CI, scripting, or when you want clean terminal output alongside a graphical program.
+
+```powershell
+ppl FIREWORKS.hpprgm --print-mode terminal
+```
+
+### Default — Both
+
+`PRINT` writes to the terminal **and** renders on the HP Prime display simultaneously.
+
+```powershell
+ppl tester.hpprgm --args "50"
+```
+
+---
+
+## All flags
 
 | Flag | Description |
 |------|-------------|
-| `--dump-python` | Print the transpiled Python to the terminal (great for debugging) |
-| `--output <path>` | Save the screen render to a custom PNG path (default: `screen.png`) |
-| `--code "PPL..."` | Run inline PPL code without a file |
+| `--args "v1,v2,…"` | Pass arguments to the EXPORT function (e.g. `--args "50"`) |
+| `--print-mode <mode>` | `screen` / `terminal` / `both` — where PRINT output goes (default: `both`) |
+| `--dump-python` | Print the transpiled Python to the terminal (useful for debugging) |
+| `--output <path>` | Save screen render to a custom PNG (default: `screen.png`) |
+| `--save` | Force PNG save even when the live pygame window is open |
+| `--code "PPL…"` | Run inline PPL code without a file |
+| `--no-lint` | Skip linting, transpile and run directly |
+| `--input <val>` | Queue a value for the next `INPUT()` call (repeatable) |
 
 Examples:
+
 ```powershell
 ppl BSTVisualizer.hpprgm --dump-python
 ppl BSTVisualizer.hpprgm --output bst_screen.png
 ppl --code "EXPORT T() BEGIN PRINT(42); END;"
+ppl sieve.hpprgm --args "100" --print-mode screen
+ppl sieve.hpprgm --args "100" --print-mode terminal
 ```
 
 ---
 
-## Run ALL tests with one command
+## Run all tests
 
-Discovers and runs every `.hpprgm` file under `8-PPL\` automatically:
+Discovers every `.hpprgm` file under `8-PPL\` and runs each one:
 
 ```powershell
-test
+pytest tests/ -v
 ```
 
-Verbose mode — shows transpiled Python on any failure:
+Unit tests only (transpiler + runtime internals):
+
 ```powershell
-test -v
+pytest tests/test_compiler.py -v
 ```
 
-Via pytest (coloured output + individual test names):
+Integration tests only:
+
 ```powershell
-py -m pytest "../0-App/test_all.py" -v
+pytest tests/test_integration.py -v
+```
+
+Run a specific test:
+
+```powershell
+pytest tests/test_compiler.py -v -k "test_for_loop"
 ```
 
 ---
 
 ## Expected output assertions
 
-To assert what a program should PRINT, create a `.expected` file next to the `.hpprgm` with the same base name:
+Create a `.expected` file next to any `.hpprgm` to assert its `PRINT` output:
 
 ```
-1-Binary Search Tree Visualizer\
-  BSTVisualizer.hpprgm
-  BSTVisualizer.expected   ← one expected PRINT line per line
+27-Tester\
+  tester.hpprgm
+  tester.expected   ← one expected PRINT line per line
 ```
 
-`test_all.py` will compare actual PRINT output against it and fail if they differ.
-
----
-
-## Unit tests (transpiler + runtime internals)
-
-```powershell
-py -m pytest "../0-App/test_ppl.py" -v
-```
-
-Run a specific test:
-```powershell
-py -m pytest "../0-App/test_ppl.py" -v -k "test_for_loop"
-```
+The integration test suite compares actual output against the `.expected` file and fails if they differ.
 
 ---
 
@@ -123,9 +156,9 @@ py -m pytest "../0-App/test_ppl.py" -v -k "test_for_loop"
 
 | File | Description |
 |------|-------------|
-| `screen.png` | 320×240 screen render saved after each run |
-| stdout | Everything your program sends to `PRINT` |
-| stderr | Emulator status messages (`[EMU]`, `[CHOOSE]`, etc.) |
+| `screen.png` | 320×240 screen render saved after each headless run |
+| stdout | `PRINT` output (when `--print-mode terminal` or `both`) |
+| pygame window | Live 320×240 display with HP Prime G1 bezel |
 
 ---
 
@@ -134,16 +167,21 @@ py -m pytest "../0-App/test_ppl.py" -v -k "test_for_loop"
 ```
 8-PPL\
   0-App\
-    run_ppl.py       ← CLI runner
-    test_all.py      ← unified test runner (discovers all .hpprgm files)
-    test_ppl.py      ← unit tests for transpiler/runtime
-    transpiler.py    ← PPL → Python transpiler
-    runtime.py       ← HP Prime runtime emulation
-    ppl.bat          ← shortcut: ppl <file.hpprgm>
-    test.bat         ← shortcut: test
-    README.md        ← this file
-  1-Binary Search Tree Visualizer\
-    BSTVisualizer.hpprgm
-  2-Your Next Program\
-    ...
+    src\ppl_emulator\
+      cli.py              ← CLI entry point  (ppl command)
+      linter.py           ← Static analysis (27+ checks)
+      transpiler\
+        core.py           ← PPL → Python line-by-line transpiler
+        expressions.py    ← Expression transformer (operators, indexing)
+        constants.py      ← Keyword/operator mappings
+      runtime\
+        engine.py         ← HP Prime builtins + pygame/Pillow renderer
+        types.py          ← PPLList (1-based), PPLMatrix, PPLString
+    tests\
+      test_compiler.py    ← Unit tests (transpiler + runtime)
+      test_integration.py ← Integration tests (all .hpprgm files)
+    examples\
+      FIREWORKS.hpprgm
+      test_draw.hpprgm
+    README.md
 ```
