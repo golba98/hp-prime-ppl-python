@@ -355,6 +355,20 @@ class Transpiler:
                         self._emit(f"_rt.SET_VAR('{d.strip().upper()}', 0, is_local=True)")
             return
         # FOR ... DOWNTO (descending loop)
+        # Supports: FROM start STEP step DOWNTO stop DO  and  FROM start DOWNTO stop STEP step DO
+        m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+STEP\s+(.+?)\s+DOWNTO\s+(.+?)\s+DO\s*(.*)$', line, re.IGNORECASE)
+        if m:
+            start = self._xf(m.group(2))
+            step  = self._xf(m.group(3))
+            stop  = self._xf(m.group(4))
+            self._emit(f"for {_safe_name(m.group(1))} in range(int({start}), int({stop}) + (1 if -int({step}) > 0 else -1), -int({step})):")
+            self.indent_level += 1
+            self._emit("_rt.PUSH_BLOCK()")
+            self._block_stack.append(('FOR', self._cur_line_raw))
+            self._emit(f"_rt.SET_VAR('{m.group(1).upper()}', {_safe_name(m.group(1))})")
+            if m.group(5):
+                self._transpile_line(m.group(5))
+            return
         m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+DOWNTO\s+(.+?)(?:\s+STEP\s+(.+?))?\s+DO\s*(.*)$', line, re.IGNORECASE)
         if m:
             start = self._xf(m.group(2))
@@ -364,26 +378,38 @@ class Transpiler:
             self.indent_level += 1
             self._emit("_rt.PUSH_BLOCK()")
             self._block_stack.append(('FOR', self._cur_line_raw))
-            # Sync the loop counter into the scope stack so it's accessible as a PPL variable
             self._emit(f"_rt.SET_VAR('{m.group(1).upper()}', {_safe_name(m.group(1))})")
             if m.group(5):
                 self._transpile_line(m.group(5))
             return
         # FOR ... TO (ascending): check for missing DO keyword
         if re.match(r'^FOR\b', line, re.IGNORECASE):
-            m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+?))?\s+DO\b\s*(.*)$', line, re.IGNORECASE)
-            if not m:
-                raise SyntaxError(f"Line {self._cur_line_raw}: Expected 'DO' in FOR loop")
-            start = self._xf(m.group(2))
-            stop  = self._xf(m.group(3))
-            step  = self._xf(m.group(4)) if m.group(4) else '1'
+            # PPL supports both orderings:
+            #   FROM start STEP step TO stop DO  (STEP before TO)
+            #   FROM start TO stop STEP step DO  (STEP after TO)
+            m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+STEP\s+(.+?)\s+TO\s+(.+?)\s+DO\b\s*(.*)$', line, re.IGNORECASE)
+            if m:
+                # STEP before TO form
+                start = self._xf(m.group(2))
+                step  = self._xf(m.group(3))
+                stop  = self._xf(m.group(4))
+                tail  = m.group(5)
+            else:
+                m = re.match(r'^FOR\s+(\w+)\s+FROM\s+(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+?))?\s+DO\b\s*(.*)$', line, re.IGNORECASE)
+                if not m:
+                    raise SyntaxError(f"Line {self._cur_line_raw}: Expected 'DO' in FOR loop")
+                # STEP after TO form (or no STEP)
+                start = self._xf(m.group(2))
+                stop  = self._xf(m.group(3))
+                step  = self._xf(m.group(4)) if m.group(4) else '1'
+                tail  = m.group(5)
             self._emit(f"for {_safe_name(m.group(1))} in range(int({start}), int({stop}) + (1 if int({step}) > 0 else -1), int({step})):")
             self.indent_level += 1
             self._emit("_rt.PUSH_BLOCK()")
             self._block_stack.append(('FOR', self._cur_line_raw))
             self._emit(f"_rt.SET_VAR('{m.group(1).upper()}', {_safe_name(m.group(1))})")
-            if m.group(5):
-                self._transpile_line(m.group(5))
+            if tail:
+                self._transpile_line(tail)
             return
         
         m = re.match(r'^WHILE\s+(.+?)\s+DO\b\s*(.*)$', line, re.IGNORECASE)
