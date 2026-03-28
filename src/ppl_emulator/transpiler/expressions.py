@@ -166,11 +166,32 @@ def _xform(expr, line_no=None, known_vars=None):
             res.append(f'PPLString("{_escape_content(content)}")')  # type: ignore
         else:
             e = val
-            # { } or [ ] -> COERCE([ ])
-            e = e.replace('{', 'COERCE([').replace('}', '])')
-            # Only match brackets if they are not preceded by an identifier (indexing)
-            e = re.sub(r'(?<![A-Za-z0-9_])\[', 'COERCE([', e)
-            e = re.sub(r'\](?![0-9A-Za-z_\[])', '])', e)
+            # { } or [ ] -> COERCE([ ]) for list literals; subscript [ ] are left as-is.
+            # A single stack-based pass tracks each bracket's origin so the closer
+            # only adds ')' when the matching opener was a list literal (not a subscript).
+            _bstk: list = []
+            _bout: list = []
+            for _bch in e:
+                if _bch == '{':
+                    _bstk.append('c')
+                    _bout.append('COERCE([')
+                elif _bch == '}':
+                    _bstk.pop() if _bstk else None
+                    _bout.append('])')
+                elif _bch == '[':
+                    _tr = ''.join(_bout).rstrip()
+                    if _tr and (_tr[-1].isalnum() or _tr[-1] in '_)]'):
+                        _bstk.append('s')   # subscript bracket
+                        _bout.append('[')
+                    else:
+                        _bstk.append('c')   # list literal
+                        _bout.append('COERCE([')
+                elif _bch == ']':
+                    _bt = _bstk.pop() if _bstk else 's'
+                    _bout.append('])')  if _bt == 'c' else _bout.append(']')
+                else:
+                    _bout.append(_bch)
+            e = ''.join(_bout)
             
             # Color literals
             # Strip leading zeros from plain decimal literals (e.g., 05 -> 5)

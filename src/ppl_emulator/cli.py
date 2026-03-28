@@ -309,6 +309,7 @@ Examples:
     parser.add_argument('--output','-o',   default='screen.png', help='Output PNG path (default: screen.png)')
     parser.add_argument('--dump-python',   action='store_true',  help='Print transpiled Python to stderr')
     parser.add_argument('--no-lint',       action='store_true',  help='Skip linting, run directly')
+    parser.add_argument('--save',          action='store_true',  help='Force saving output image even when live pygame window is active')
     parser.add_argument('--warnings-only', action='store_true',  help='Show warnings but do not fail on them')
     parser.add_argument('--input',         action='append',      help='Provide a value for INPUT() calls in headless mode (can be used multiple times)')
     args = parser.parse_args()
@@ -382,6 +383,7 @@ Examples:
     # Enable strict compiled-mode: undeclared variable access raises NameError
     # rather than silently creating a zero-initialised global (Discrepancy 3 fix).
     HPPrimeRuntime._compiled_mode = True
+    HPPrimeRuntime._force_save_output_default = bool(args.save)
     ns = {'__name__': '__main__', '__file__': args.file or '<ppl>'}
 
     short    = os.path.basename(filename) if filename else 'inline code'
@@ -390,30 +392,21 @@ Examples:
     _divider()
     print()
 
-    spinner = _Spinner(label=short)
-    spinner.start()
-
     try:
         exec(compile(python_code, '<ppl_transpiled>', 'exec'), ns)
-
-        rt = ns.get('_rt')
-        if rt and getattr(rt, '_input_cancelled', 0) > 0:
-            n = rt._input_cancelled
-            print(f"\n  {_CLR_YEL}note:{_CLR_RST} {n} INPUT call(s) were cancelled (headless mode). Results may be empty or default.")
 
     except (KeyboardInterrupt, SystemExit):
         pass   # clean stop — still show FINISHED banner
 
     except Exception as e:
-        spinner.stop()   # stop before printing the error block
         _show_runtime_error(filename, e, python_code)
         if args.dump_python:
             traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
     finally:
-        spinner.stop()
         HPPrimeRuntime._compiled_mode = False  # reset for subsequent uses in same process
+        HPPrimeRuntime._force_save_output_default = False
 
     # ── FINISHED banner ──────────────────────────────────────────
     print()
@@ -421,36 +414,32 @@ Examples:
     print(f"  {_CLR_GRN}{_CLR_BLD}✓  FINISHED{_CLR_RST}  {_CLR_GRY}{short}{_CLR_RST}")
     _divider('═', _CLR_GRN)
 
-    # ── Output image notice ──────────────────────────────────────
+    # ── Optional output image notice ─────────────────────────────
     rt = ns.get('_rt')
-    # Force a save to the resolved output path if graphics were drawn.
-    if rt is not None and getattr(rt, "screen_is_dirty", False):
-        try:
-            rt.save(out_path)
-        except Exception:
-            pass
+    live_window = bool(rt is not None and getattr(rt, "_pg_enabled", False))
     saved_path = None
     if rt is not None and hasattr(rt, "_last_saved_path"):
         saved_path = rt._last_saved_path
-    if saved_path and os.path.exists(saved_path):
+    if (args.save or not live_window) and saved_path and os.path.exists(saved_path):
         size_kb = os.path.getsize(saved_path) / 1024
         print(f"\n  {_CLR_BLU}→  Output image:{_CLR_RST}  {_CLR_BLD}{saved_path}{_CLR_RST}")
         print(f"     {_CLR_GRY}320×240 px  ·  {size_kb:.1f} KB{_CLR_RST}")
-    elif os.path.exists(out_path):
-        size_kb = os.path.getsize(out_path) / 1024
-        print(f"\n  {_CLR_BLU}→  Output image:{_CLR_RST}  {_CLR_BLD}{out_path}{_CLR_RST}")
-        print(f"     {_CLR_GRY}320×240 px  ·  {size_kb:.1f} KB{_CLR_RST}")
-    else:
-        # No graphics were emitted; stay silent.
-        pass
-    print()
 
-    # Clean up pygame if it was used.
+    # Keep live pygame window open until user closes it, then clean up.
     if rt is not None and hasattr(rt, "close"):
         try:
+            if getattr(rt, "_pg_enabled", False):
+                try:
+                    while getattr(rt, "_pg_enabled", False):
+                        rt.WAIT(0.016)  # ~60 FPS idle refresh loop
+                except (KeyboardInterrupt, SystemExit):
+                    pass
             rt.close()
         except Exception:
             pass
+        # Hard-exit to avoid Windows CMD's "Terminate batch job (Y/N)?" prompt
+        # when the pygame window is closed or Ctrl+C is pressed.
+        os._exit(0)
 
 
 

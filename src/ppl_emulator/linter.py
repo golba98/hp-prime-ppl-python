@@ -692,7 +692,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 _m_fw = re.match(r'^([A-Za-z_]\w*)', bare_clean)
                 _fw = _m_fw.group(1).upper() if _m_fw else ''
                 if _fw not in _SEMI_EXEMPT_KW:
-                    warn(curr_ln, "Missing semicolon at end of statement.", display)
+                    err(curr_ln, "Missing semicolon at end of statement.", display)
 
             # ── Unreachable code check ────────────────────────────────────────────────────
             if unreachable_flag:

@@ -4,7 +4,7 @@ HP Prime runtime engine.
 Provides ``HPPrimeRuntime`` — the Python object that is bound to ``_rt`` in
 every transpiled program.  It emulates the HP Prime built-in environment:
 
-  * Graphics (RECT_P, LINE_P, CIRCLE_P, TEXTOUT_P, …) via Pillow → screen.png
+  * Graphics (RECT_P, LINE_P, CIRCLE_P, TEXTOUT_P, …) via live pygame window
   * Math builtins (SIN/COS take degrees, matching HP Prime behaviour)
   * String functions (LEFT, RIGHT, MID, INSTRING, …)
   * I/O (PRINT, INPUT, CHOOSE, GETKEY) with headless-safe defaults
@@ -30,7 +30,13 @@ def _coerce_list(value):
 
     A flat list becomes PPLList; a list-of-lists becomes PPLMatrix
     (Discrepancy 1: matrix elements must be mutable).
+    PPLVar items are unwrapped to their current value so that list literals
+    like [i] store a snapshot of i's value, not a live reference to the variable.
     """
+    if isinstance(value, PPLVar):
+        # Unwrap the boxed variable so list literals capture the value, not the
+        # live PPLVar reference (which would mutate as the variable changes).
+        return _coerce_list(value.value)
     if isinstance(value, (PPLList, PPLMatrix, PPLString)):
         if isinstance(value, PPLList):
             # If a PPLList contains list-like rows, treat it as a 2-D matrix.
@@ -136,11 +142,13 @@ class HPPrimeRuntime:
     """Central emulation object — bound to ``_rt`` in every transpiled program.
 
     Manages variable scopes, graphics output, and all HP Prime built-in
-    functions. Graphics are drawn to a 320×240 Pillow Image and saved to
-    ``screen.png`` by ``save()``.
+    functions. Graphics are rendered in a 320×240 pygame window and mirrored
+    to a Pillow image for compatibility and PNG export.
     """
 
     _pending_input_queue: list = []
+    # When True, always allow PNG save even if a live pygame window exists.
+    _force_save_output_default: bool = False
     # Discrepancy 3: set to True before exec()ing transpiled code to enable strict
     # compiled-mode variable lookup (undeclared vars raise NameError).
     # The CLI sets this via HPPrimeRuntime._compiled_mode = True before exec().
@@ -153,10 +161,15 @@ class HPPrimeRuntime:
         self.screen_is_dirty = False
         # Track last saved output path (if any).
         self._last_saved_path = None
+        self._force_save_output = HPPrimeRuntime._force_save_output_default
         # Optional real-time pygame display.
         self._pg_enabled = False
+        self._pg_should_close = False
+        self._pg_window = None
+        self._pg_window_size = (560, 460)
         self._pg_screen = None
         self._pg_font = None
+        self._pg_fonts: dict[int, object] = {}
         self.grobs = [HP_Grob(self.width, self.height, runtime=self)] + [None]*9
         self.G0 = self.grobs[0]
         self.img = self.G0.img
@@ -182,13 +195,15 @@ class HPPrimeRuntime:
             try:
                 pygame.init()
                 pygame.font.init()
-                self._pg_screen = pygame.display.set_mode((self.width, self.height))
-                pygame.display.set_caption("HP Prime PPL Emulator")
-                self._pg_font = pygame.font.Font(None, 14)
+                self._pg_window = pygame.display.set_mode(self._pg_window_size, pygame.RESIZABLE)
+                self._pg_screen = pygame.Surface((self.width, self.height)).convert()
+                pygame.display.set_caption("HP Prime Emulator")
+                self._pg_enabled = True
+                self._pg_font = self._get_pg_font(14)
                 # Start with a white background like the PIL buffer.
                 self._pg_screen.fill((255, 255, 255))
+                self._present_display()
                 pygame.display.flip()
-                self._pg_enabled = True
             except Exception:
                 self._pg_enabled = False
 
@@ -237,13 +252,124 @@ class HPPrimeRuntime:
 
     # ── Pygame helpers ───────────────────────────────────────────────
 
+    def _get_pg_font(self, size):
+        if pygame is None:
+            return None
+        size = max(1, int(size))
+        cached = self._pg_fonts.get(size)
+        if cached is not None:
+            return cached
+
+        font_obj = None
+        for name in ("consolas", "couriernew", "courier", "dejavusansmono", "liberationmono", "monospace"):
+            try:
+                path = pygame.font.match_font(name)
+                if path:
+                    font_obj = pygame.font.Font(path, size)
+                    break
+            except Exception:
+                continue
+        if font_obj is None:
+            font_obj = pygame.font.SysFont("monospace", size)
+
+        self._pg_fonts[size] = font_obj
+        return font_obj
+
+    def _present_display(self):
+        if not self._pg_enabled or pygame is None or self._pg_window is None or self._pg_screen is None:
+            return
+
+        ww, wh = self._pg_window.get_size()
+
+        # ── HP Prime G1 screen-only view ──────────────────────────────
+        # Dark aluminium background (matches G1 body colour).
+        BG       = (28, 30, 36)
+        BEZEL    = (44, 46, 54)       # outer bezel face
+        BEZEL_HI = (72, 76, 88)       # highlight rim
+        BEZEL_SH = (18, 19, 23)       # shadow rim
+        INNER    = (10, 11, 14)       # recessed screen surround
+        HDR_BG   = (22, 24, 30)       # title-bar strip
+        HDR_TXT  = (180, 185, 200)    # title-bar text
+        ACCENT   = (0, 113, 197)      # HP blue accent line
+
+        self._pg_window.fill(BG)
+
+        # Outer bezel — rounded rectangle with a subtle 3-D rim.
+        margin = max(18, min(ww, wh) // 18)
+        bezel_rect = pygame.Rect(margin, margin, ww - 2 * margin, wh - 2 * margin)
+        pygame.draw.rect(self._pg_window, BEZEL, bezel_rect, border_radius=18)
+        # Highlight (top-left edge)
+        pygame.draw.rect(self._pg_window, BEZEL_HI, bezel_rect, width=1, border_radius=18)
+        # Shadow inset (bottom-right feel via a second rect 1 px smaller)
+        shadow_r = bezel_rect.inflate(-2, -2)
+        pygame.draw.rect(self._pg_window, BEZEL_SH, shadow_r, width=1, border_radius=16)
+
+        # Title bar strip at top of bezel.
+        hdr_h = max(22, bezel_rect.height // 14)
+        hdr_rect = pygame.Rect(bezel_rect.x + 1, bezel_rect.y + 1,
+                               bezel_rect.width - 2, hdr_h)
+        # Clip to rounded top corners by drawing over bezel background first.
+        pygame.draw.rect(self._pg_window, HDR_BG, hdr_rect)
+        # HP blue accent line under the title bar.
+        accent_y = hdr_rect.bottom
+        pygame.draw.line(self._pg_window, ACCENT,
+                         (bezel_rect.x + 4, accent_y),
+                         (bezel_rect.right - 4, accent_y), 2)
+        # "HP Prime" label in title bar.
+        try:
+            label_font = pygame.font.SysFont("segoeui,arial,sans-serif", max(11, hdr_h - 6), bold=True)
+        except Exception:
+            label_font = pygame.font.SysFont("monospace", max(11, hdr_h - 6))
+        lbl = label_font.render("HP Prime", True, HDR_TXT)
+        self._pg_window.blit(lbl, (bezel_rect.x + 10, hdr_rect.y + (hdr_h - lbl.get_height()) // 2))
+
+        # Recessed screen area below title bar.
+        pad = max(10, bezel_rect.width // 28)
+        screen_area_top = accent_y + pad
+        screen_area = pygame.Rect(
+            bezel_rect.x + pad,
+            screen_area_top,
+            bezel_rect.width - 2 * pad,
+            bezel_rect.bottom - screen_area_top - pad,
+        )
+        pygame.draw.rect(self._pg_window, INNER, screen_area, border_radius=6)
+        pygame.draw.rect(self._pg_window, BEZEL_SH, screen_area, width=2, border_radius=6)
+
+        # Scale 320×240 content to fit screen_area, keeping 4:3.
+        target_w = screen_area.width - 8
+        target_h = int(target_w * 3 / 4)
+        if target_h > screen_area.height - 8:
+            target_h = screen_area.height - 8
+            target_w = int(target_h * 4 / 3)
+        target_w = max(4, target_w)
+        target_h = max(3, target_h)
+
+        screen_rect = pygame.Rect(
+            screen_area.centerx - target_w // 2,
+            screen_area.centery - target_h // 2,
+            target_w,
+            target_h,
+        )
+        scaled = pygame.transform.scale(self._pg_screen, (target_w, target_h))
+        self._pg_window.blit(scaled, screen_rect.topleft)
+
     def _pg_pump(self):
         if not self._pg_enabled or pygame is None:
             return
         pygame.event.pump()
-        for event in pygame.event.get():
+        for event in pygame.event.get([pygame.QUIT, pygame.VIDEORESIZE]):
             if event.type == pygame.QUIT:
-                raise SystemExit(0)
+                self._pg_should_close = True
+                break
+            if event.type == pygame.VIDEORESIZE and self._pg_window is not None:
+                new_w = max(380, int(event.w))
+                new_h = max(320, int(event.h))
+                self._pg_window = pygame.display.set_mode((new_w, new_h), pygame.RESIZABLE)
+                self._present_display()
+                pygame.display.flip()
+        if self._pg_should_close:
+            self.close()
+            raise SystemExit(0)
 
     # ── Output ───────────────────────────────────────────────────────
 
@@ -299,23 +425,31 @@ class HPPrimeRuntime:
 
     def CHOOSE(self, title, options, *extra):
         self._choose_calls += 1
-        if self._choose_calls > 20:
+        if not self._pg_enabled and self._choose_calls > 20:
             raise SystemExit(0)
         print(f"[CHOOSE] headless — '{title}' → 1 (first option)")
         return 1
 
     def WAIT(self, t=0):
         self._wait_calls += 1
-        if self._wait_calls > 10:
+        if not self._pg_enabled and self._wait_calls > 10:
             raise SystemExit(0)
         if self._pg_enabled and pygame is not None:
-            self._pg_pump()
+            self._present_display()
             pygame.display.flip()
+            pygame.event.pump()
+            self._pg_pump()
             try:
-                pygame.time.wait(int(float(t) * 1000))
+                pygame.time.delay(max(0, int(float(t) * 1000)))
             except Exception:
                 time.sleep(float(t))
             return 4
+        try:
+            delay = max(0.0, float(t))
+        except Exception:
+            delay = 0.0
+        if delay > 0:
+            time.sleep(delay)
         return 4 
 
     # Maximum GETKEY iterations before auto-sending the ESC keycode (4).
@@ -323,10 +457,12 @@ class HPPrimeRuntime:
     _GETKEY_MAX_CALLS: int = 30
 
     def GETKEY(self):
+        if self._pg_enabled and pygame is not None:
+            self._pg_pump()
         self._getkey_calls += 1
         # After the threshold, simulate ESC (keycode 4) so GETKEY-based
         # event loops exit cleanly without requiring Ctrl+C.
-        if self._getkey_calls > self._GETKEY_MAX_CALLS:
+        if not self._pg_enabled and self._getkey_calls > self._GETKEY_MAX_CALLS:
             return 4   # ESC / exit key on HP Prime
         # Return -1 (no key) for the first few calls, then start returning 0
         # so that programs that check k >= 0 see something meaningful.
@@ -335,8 +471,10 @@ class HPPrimeRuntime:
         return 0
 
     def ISKEYDOWN(self, key_code):
+        if self._pg_enabled and pygame is not None:
+            self._pg_pump()
         self._iskeydown_calls += 1
-        if self._iskeydown_calls > 30:
+        if not self._pg_enabled and self._iskeydown_calls > 30:
             raise SystemExit(0)
         return True
 
@@ -355,12 +493,23 @@ class HPPrimeRuntime:
 
     def _color(self, c):
         """Convert an HP Prime packed colour integer to an (R, G, B) tuple."""
-        if isinstance(c, tuple):
-            return c
+        if isinstance(c, tuple) and len(c) >= 3:
+            return (int(c[0]) & 255, int(c[1]) & 255, int(c[2]) & 255)
+        if isinstance(c, str):
+            s = c.strip().lower()
+            if s.startswith('#') and s.endswith('h'):
+                s = f"0x{s[1:-1]}"
+            elif s.endswith('h'):
+                s = f"0x{s[:-1]}"
+            try:
+                c = int(s, 0)
+            except (TypeError, ValueError):
+                return (0, 0, 0)
         try:
             c = int(c)
         except (TypeError, ValueError):
             return (0, 0, 0)
+        c = c & 0xFFFFFF
         return ((c >> 16) & 255, (c >> 8) & 255, c & 255)
 
     def RGB(self, r, g, b, a=255):
@@ -373,37 +522,38 @@ class HPPrimeRuntime:
         if not args:
             if self._pg_enabled and pygame is not None:
                 self._pg_screen.fill((255, 255, 255))
-            else:
-                self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
+            self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
             return
         x1, y1 = int(args[0]), int(args[1])
         x2, y2 = int(args[2]), int(args[3])
         color = self._color(args[4]) if len(args) > 4 else (0,0,0)
         fill = self._color(args[5]) if len(args) > 5 else None
+        left, top = min(x1, x2), min(y1, y2)
+        w, h = abs(x2 - x1), abs(y2 - y1)
         if self._pg_enabled and pygame is not None:
-            left, top = min(x1, x2), min(y1, y2)
-            w, h = abs(x2 - x1), abs(y2 - y1)
+            self._pg_pump()
             if fill is not None:
                 pygame.draw.rect(self._pg_screen, fill, (left, top, w, h), 0)
             pygame.draw.rect(self._pg_screen, color, (left, top, w, h), 1)
-        else:
-            self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
+        self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
 
     def LINE_P(self, x1, y1, x2, y2, color=0):
         self.screen_is_dirty = True
+        c = self._color(color)
         if self._pg_enabled and pygame is not None:
+            self._pg_pump()
             pygame.draw.line(
-                self._pg_screen, self._color(color), (int(x1), int(y1)), (int(x2), int(y2)), 1
+                self._pg_screen, c, (int(x1), int(y1)), (int(x2), int(y2)), 1
             )
-        else:
-            self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=self._color(color))
+        self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=c)
 
     def PIXON_P(self, x, y, color=0):
         self.screen_is_dirty = True
+        c = self._color(color)
         if self._pg_enabled and pygame is not None:
-            self._pg_screen.set_at((int(x), int(y)), self._color(color))
-        else:
-            self.draw.point([int(x), int(y)], fill=self._color(color))
+            self._pg_pump()
+            self._pg_screen.set_at((int(x), int(y)), c)
+        self.draw.point([int(x), int(y)], fill=c)
 
     def RECT(self, *args): self.RECT_P(*args)
     def LINE(self, *args): self.LINE_P(*args)
@@ -412,35 +562,39 @@ class HPPrimeRuntime:
     def FILLCIRCLE_P(self, x, y, r, color=0):
         self.screen_is_dirty = True
         x, y, r = int(float(x)), int(float(y)), int(float(r))
+        c = self._color(color)
         if self._pg_enabled and pygame is not None:
-            pygame.draw.circle(self._pg_screen, self._color(color), (x, y), r, 0)
-        else:
-            self.draw.ellipse([x-r, y-r, x+r, y+r], fill=self._color(color), outline=self._color(color))
+            self._pg_pump()
+            pygame.draw.circle(self._pg_screen, c, (x, y), r, 0)
+        self.draw.ellipse([x-r, y-r, x+r, y+r], fill=c, outline=c)
 
     def CIRCLE_P(self, x, y, r, color=0):
         self.screen_is_dirty = True
         x, y, r = int(float(x)), int(float(y)), int(float(r))
+        c = self._color(color)
         if self._pg_enabled and pygame is not None:
-            pygame.draw.circle(self._pg_screen, self._color(color), (x, y), r, 1)
-        else:
-            self.draw.ellipse([x-r, y-r, x+r, y+r], outline=self._color(color))
+            self._pg_pump()
+            pygame.draw.circle(self._pg_screen, c, (x, y), r, 1)
+        self.draw.ellipse([x-r, y-r, x+r, y+r], outline=c)
 
     def TEXTOUT_P(self, text, x, y, font=1, color=0, width=320, background=None):
         self.screen_is_dirty = True
         x, y = int(float(x)), int(float(y))
         c = self._color(color)
+        self.draw.text((x, y), str(text), fill=c, font=ImageFont.load_default())
+        self.draw.point((x, y), fill=c)
         # Note: background colour fill is not implemented (no font metrics to measure width).
-        try:
-            if self._pg_enabled and pygame is not None:
+        if self._pg_enabled and pygame is not None:
+            try:
+                self._pg_pump()
+                size = max(8, int(float(font)))
+                self._pg_font = self._get_pg_font(size)
                 if self._pg_font is None:
-                    self._pg_font = pygame.font.Font(None, 14)
+                    self._pg_font = pygame.font.SysFont("monospace", size)
                 surf = self._pg_font.render(str(text), True, c)
                 self._pg_screen.blit(surf, (x, y))
-            else:
-                f = ImageFont.load_default()
-                self.draw.text((x, y), str(text), fill=c, font=f)
-        except Exception:
-            print(f"[EMU] TEXTOUT_P fallback: {text} at ({x},{y})")
+            except Exception:
+                pass
 
     def INVERT_P(self, x1=0, y1=0, x2=319, y2=239):
         self.screen_is_dirty = True
@@ -452,18 +606,16 @@ class HPPrimeRuntime:
         iy2 = max(0, min(max(y1, y2), self.height - 1))
         
         if self._pg_enabled and pygame is not None:
-            arr = pygame.surfarray.pixels3d(self._pg_screen)
+            self._pg_pump()
             for py in range(iy1, iy2 + 1):
                 for px in range(ix1, ix2 + 1):
-                    r, g, b = arr[px, py]
-                    arr[px, py] = (255 - r, 255 - g, 255 - b)
-            del arr
-        else:
-            pixels = self.img.load()
-            for py in range(iy1, iy2 + 1):
-                for px in range(ix1, ix2 + 1):
-                    r, g, b = pixels[px, py]
-                    pixels[px, py] = (255 - r, 255 - g, 255 - b)
+                    r, g, b, _ = self._pg_screen.get_at((px, py))
+                    self._pg_screen.set_at((px, py), (255 - r, 255 - g, 255 - b))
+        pixels = self.img.load()
+        for py in range(iy1, iy2 + 1):
+            for px in range(ix1, ix2 + 1):
+                r, g, b = pixels[px, py]
+                pixels[px, py] = (255 - r, 255 - g, 255 - b)
 
     # ── Math ─────────────────────────────────────────────────────────
 
@@ -568,6 +720,8 @@ class HPPrimeRuntime:
         if length is None: return s[start:]
         return s[start : start + int(length)]
     def CONCAT(self, a, b):
+        if isinstance(a, PPLVar): a = a.value
+        if isinstance(b, PPLVar): b = b.value
         if isinstance(a, list) and isinstance(b, list):
             return PPLList(list(a) + list(b))
         return str(a) + str(b)
@@ -612,23 +766,32 @@ class HPPrimeRuntime:
     def EVAL(self, x): return self.EXPR(x)
     def sto(self, *args): return args[0] if args else 0
 
-    def save(self, path='screen.png'):
+    def save(self, path='screen.png', force=None):
+        if force is None:
+            force = self._force_save_output
         if self.screen_is_dirty:
+            if self._pg_enabled and pygame is not None and not force:
+                return False
             if self._pg_enabled and pygame is not None:
                 pygame.image.save(self._pg_screen, path)
             else:
                 self.img.save(path)
             self._last_saved_path = os.path.abspath(path)
-            print(f"[EMU] screen → {path}", file=sys.stderr)
             return True
         return False
 
     def close(self):
         if self._pg_enabled and pygame is not None:
             try:
+                pygame.display.quit()
                 pygame.quit()
             finally:
                 self._pg_enabled = False
+                self._pg_should_close = False
+                self._pg_window = None
+                self._pg_screen = None
+                self._pg_font = None
+                self._pg_fonts.clear()
 
 class _FinanceMock:
     """Stub for the HP Prime Finance object — all methods return 0.0."""
