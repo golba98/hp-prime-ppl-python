@@ -183,6 +183,12 @@ class HPPrimeRuntime:
         self._choose_calls = 0
         self._input_queue: list = HPPrimeRuntime._pending_input_queue[:]
         HPPrimeRuntime._pending_input_queue = []
+        # Terminal text buffer — lines printed via PRINT() shown on the pygame screen.
+        self._terminal_lines: list[str] = []
+        self._terminal_font = None   # initialised lazily after pygame.font.init()
+        # Set to True once any explicit graphics call (RECT_P, LINE_P, etc.) is made.
+        # When True, _render_terminal does NOT clear the screen so graphics are preserved.
+        self._graphics_mode: bool = False
         self.CAS    = CAS(self)
         self.Finance = _FinanceMock()
         self._fn_registry: dict[str, int] = {}
@@ -376,10 +382,68 @@ class HPPrimeRuntime:
     # ── Output ───────────────────────────────────────────────────────
 
     def PRINT(self, *args):
-        print(*(str(a) for a in args))
+        text = ' '.join(str(a) for a in args)
+        print(text)
+        self._terminal_lines.append(text)
+        if self._pg_enabled and pygame is not None and self._pg_screen is not None:
+            self._render_terminal()
+            self._present_display()
+            pygame.display.flip()
+
+    def _render_terminal(self):
+        """Draw all buffered PRINT lines onto the 320×240 _pg_screen.
+
+        Pure terminal mode (no graphics calls): clears to white first, like the
+        HP Prime Home view.  Graphics mode: overlays text on existing content.
+        """
+        if pygame is None or self._pg_screen is None:
+            return
+        # Lazily build a small monospace font
+        if self._terminal_font is None:
+            try:
+                self._terminal_font = pygame.font.SysFont("consolas,courier new,monospace", 14)
+            except Exception:
+                self._terminal_font = pygame.font.Font(None, 16)
+        font   = self._terminal_font
+        line_h = font.get_linesize() + 2
+        pad_x, pad_y = 4, 4
+        max_w  = self.width - 2 * pad_x
+        max_lines = max(1, (self.height - 2 * pad_y) // line_h)
+
+        if not self._graphics_mode:
+            self._pg_screen.fill((255, 255, 255))
+
+        # Build a flat list of display rows (each logical PRINT line may word-wrap)
+        rows: list[str] = []
+        for line in self._terminal_lines:
+            if font.size(line)[0] <= max_w:
+                rows.append(line)
+            else:
+                # Simple character-level wrap
+                cur = ''
+                for ch in line:
+                    if font.size(cur + ch)[0] <= max_w:
+                        cur += ch
+                    else:
+                        rows.append(cur)
+                        cur = ch
+                if cur:
+                    rows.append(cur)
+
+        # Show only the bottom max_lines rows (scroll)
+        visible_rows = rows[-max_lines:]
+        for i, row in enumerate(visible_rows):
+            surf = font.render(row, True, (0, 0, 0))
+            self._pg_screen.blit(surf, (pad_x, pad_y + i * line_h))
 
     def MSGBOX(self, msg):
-        print(f"[MSGBOX] {msg}")
+        text = f"[MSG] {msg}"
+        print(text)
+        self._terminal_lines.append(text)
+        if self._pg_enabled and pygame is not None and self._pg_screen is not None:
+            self._render_terminal()
+            self._present_display()
+            pygame.display.flip()
 
     def _get_entry_arg(self, idx: int):
         """Return the idx-th CLI --args value, coerced to int/float/str, defaulting to 0."""
@@ -542,6 +606,7 @@ class HPPrimeRuntime:
 
     def RECT_P(self, *args):
         self.screen_is_dirty = True
+        self._graphics_mode = True
         if not args:
             # Clear to white — write to both buffers
             self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
