@@ -153,6 +153,8 @@ class HPPrimeRuntime:
     # compiled-mode variable lookup (undeclared vars raise NameError).
     # The CLI sets this via HPPrimeRuntime._compiled_mode = True before exec().
     _compiled_mode: bool = False
+    # CLI --args values fed into the EXPORT function's default call.
+    _entry_args: list = []
 
     def __init__(self, compiled_mode=None):
         self.width  = 320
@@ -379,6 +381,20 @@ class HPPrimeRuntime:
     def MSGBOX(self, msg):
         print(f"[MSGBOX] {msg}")
 
+    def _get_entry_arg(self, idx: int):
+        """Return the idx-th CLI --args value, coerced to int/float/str, defaulting to 0."""
+        args = HPPrimeRuntime._entry_args
+        if idx < len(args):
+            val = args[idx]
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return val
+        return 0
+
     def INPUT(self, vars_spec, title="", labels=None, help_text=None):
         label = title if title else (vars_spec if isinstance(vars_spec, str) else "?")
 
@@ -527,10 +543,10 @@ class HPPrimeRuntime:
     def RECT_P(self, *args):
         self.screen_is_dirty = True
         if not args:
+            # Clear to white — write to both buffers
+            self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
             if self._pg_enabled and pygame is not None:
                 self._pg_screen.fill((255, 255, 255))
-            else:
-                self.draw.rectangle([0, 0, self.width-1, self.height-1], fill=(255,255,255))
             return
         x1, y1 = int(args[0]), int(args[1])
         x2, y2 = int(args[2]), int(args[3])
@@ -538,33 +554,33 @@ class HPPrimeRuntime:
         fill = self._color(args[5]) if len(args) > 5 else None
         left, top = min(x1, x2), min(y1, y2)
         w, h = abs(x2 - x1), abs(y2 - y1)
+        # Always keep Pillow in sync (used for PNG export and pixel tests)
+        self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             if fill is not None:
                 pygame.draw.rect(self._pg_screen, fill, (left, top, w, h), 0)
             pygame.draw.rect(self._pg_screen, color, (left, top, w, h), 1)
-        else:
-            self.draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill)
 
     def LINE_P(self, x1, y1, x2, y2, color=0):
         self.screen_is_dirty = True
         c = self._color(color)
+        # Always keep Pillow in sync
+        self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=c)
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             pygame.draw.line(
                 self._pg_screen, c, (int(x1), int(y1)), (int(x2), int(y2)), 1
             )
-        else:
-            self.draw.line([int(x1), int(y1), int(x2), int(y2)], fill=c)
 
     def PIXON_P(self, x, y, color=0):
         self.screen_is_dirty = True
         c = self._color(color)
+        # Always keep Pillow in sync
+        self.draw.point([int(x), int(y)], fill=c)
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             self._pg_screen.set_at((int(x), int(y)), c)
-        else:
-            self.draw.point([int(x), int(y)], fill=c)
 
     def RECT(self, *args): self.RECT_P(*args)
     def LINE(self, *args): self.LINE_P(*args)
@@ -574,29 +590,30 @@ class HPPrimeRuntime:
         self.screen_is_dirty = True
         x, y, r = int(float(x)), int(float(y)), int(float(r))
         c = self._color(color)
+        # Always keep Pillow in sync
+        self.draw.ellipse([x-r, y-r, x+r, y+r], fill=c, outline=c)
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             pygame.draw.circle(self._pg_screen, c, (x, y), r, 0)
-        else:
-            self.draw.ellipse([x-r, y-r, x+r, y+r], fill=c, outline=c)
 
     def CIRCLE_P(self, x, y, r, color=0):
         self.screen_is_dirty = True
         x, y, r = int(float(x)), int(float(y)), int(float(r))
         c = self._color(color)
+        # Always keep Pillow in sync
+        self.draw.ellipse([x-r, y-r, x+r, y+r], outline=c)
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             pygame.draw.circle(self._pg_screen, c, (x, y), r, 1)
-        else:
-            self.draw.ellipse([x-r, y-r, x+r, y+r], outline=c)
 
     def TEXTOUT_P(self, text, x, y, font=1, color=0, width=320, background=None):
         self.screen_is_dirty = True
         x, y = int(float(x)), int(float(y))
         c = self._color(color)
+        # Always write to Pillow (PNG export / test pixel checks)
+        self.draw.text((x, y), str(text), fill=c, font=ImageFont.load_default())
         if self._pg_enabled and pygame is not None:
-            # Live window: render via pygame font — higher quality than Pillow's
-            # load_default() and already reflected in the PNG via pygame.image.save().
+            # Also render via pygame font for the live window (higher quality)
             try:
                 self._pg_pump()
                 size = max(8, int(float(font)))
@@ -607,10 +624,6 @@ class HPPrimeRuntime:
                 self._pg_screen.blit(surf, (x, y))
             except Exception:
                 pass
-        else:
-            # Headless: write to Pillow buffer for PNG export.
-            self.draw.text((x, y), str(text), fill=c, font=ImageFont.load_default())
-            self.draw.point((x, y), fill=c)
 
     def INVERT_P(self, x1=0, y1=0, x2=319, y2=239):
         self.screen_is_dirty = True
@@ -621,18 +634,19 @@ class HPPrimeRuntime:
         iy1 = max(0, min(y1, y2, self.height - 1))
         iy2 = max(0, min(max(y1, y2), self.height - 1))
         
+        # Always invert the Pillow buffer (canonical store)
+        pixels = self.img.load()
+        for py in range(iy1, iy2 + 1):
+            for px in range(ix1, ix2 + 1):
+                r, g, b = pixels[px, py][:3]
+                pixels[px, py] = (255 - r, 255 - g, 255 - b)
+        # Mirror to pygame if live
         if self._pg_enabled and pygame is not None:
             self._pg_pump()
             for py in range(iy1, iy2 + 1):
                 for px in range(ix1, ix2 + 1):
                     r, g, b, _ = self._pg_screen.get_at((px, py))
                     self._pg_screen.set_at((px, py), (255 - r, 255 - g, 255 - b))
-        else:
-            pixels = self.img.load()
-            for py in range(iy1, iy2 + 1):
-                for px in range(ix1, ix2 + 1):
-                    r, g, b = pixels[px, py]
-                    pixels[px, py] = (255 - r, 255 - g, 255 - b)
 
     # ── Math ─────────────────────────────────────────────────────────
 
@@ -777,9 +791,28 @@ class HPPrimeRuntime:
                 return s[:start] + str(replacement) + s[start + length:]
 
     def EXPR(self, s): return ppl_expr(s)
-    def MAKELIST(self, expr, var=None, start=1, end=1, step=1):
-        """Stub: return a zero-filled list of the correct length (expr is not evaluated)."""
-        return PPLList([0] * (int(end) - int(start) + 1))
+    def MAKELIST(self, expr, var_name=None, start=1, end=1, step=1):
+        """Create a PPL list by evaluating expr for var from start to end (inclusive).
+
+        expr may be:
+          - a no-arg lambda (transpiler wraps expressions so SET_VAR is called first)
+          - a plain constant value (for MAKELIST(0, i, 1, n) style calls)
+        var_name is the uppercased PPL variable name string used as the loop counter.
+        """
+        n_start = int(start) if start is not None else 1
+        n_end   = int(end)   if end   is not None else 1
+        n_step  = int(step)  if step  else 1
+        indices = range(n_start, n_end + 1, n_step)
+        if callable(expr):
+            result = []
+            for i in indices:
+                if var_name:
+                    self.SET_VAR(str(var_name), i)
+                result.append(expr())
+            return PPLList(result)
+        # Constant expression — just repeat the value
+        val = expr.value if isinstance(expr, PPLVar) else (expr if expr is not None else 0)
+        return PPLList([val] * max(0, len(indices)))
     def EVAL(self, x): return self.EXPR(x)
     def sto(self, *args): return args[0] if args else 0
 

@@ -740,7 +740,13 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             if not stmt.endswith(';'):
                 _m_fw = re.match(r'^([A-Za-z_]\w*)', bare_clean)
                 _fw = _m_fw.group(1).upper() if _m_fw else ''
-                if _fw not in _SEMI_EXEMPT_KW:
+                # LOCAL funcname(params) is a function header — no semicolon needed
+                _is_local_fn_hdr = (
+                    _fw == 'LOCAL'
+                    and bool(re.match(r'^LOCAL\s+\w+\s*\(', bare_clean, re.IGNORECASE))
+                    and ':=' not in bare_clean
+                )
+                if _fw not in _SEMI_EXEMPT_KW and not _is_local_fn_hdr:
                     err(curr_ln, "Missing semicolon at end of statement.", display)
 
             # ── Unreachable code check ────────────────────────────────────────────────────

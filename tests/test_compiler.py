@@ -672,10 +672,13 @@ class TestNewGraphics:
         for y in range(10, 26):
             for x in range(10, 26):
                 px = rt.img.getpixel((x, y))
-                if px == (0, 0, 0):
+                # Newer Pillow load_default() returns an anti-aliased TrueType font,
+                # so pixels may be grey rather than pure black.  Accept any channel
+                # value < 128 as "dark enough".
+                if all(ch < 128 for ch in px[:3]):
                     found_dark = True
                     break
-        assert found_dark, "TEXTOUT_P did not render any black pixels"
+        assert found_dark, "TEXTOUT_P did not render any dark pixels"
 
     def test_invert_p(self):
         """INVERT_P should flip pixel colors."""

@@ -312,12 +312,18 @@ Examples:
     parser.add_argument('--save',          action='store_true',  help='Force saving output image even when live pygame window is active')
     parser.add_argument('--warnings-only', action='store_true',  help='Show warnings but do not fail on them')
     parser.add_argument('--input',         action='append',      help='Provide a value for INPUT() calls in headless mode (can be used multiple times)')
+    parser.add_argument('--args',          default='',           help='Comma-separated arguments for the EXPORT function (e.g. --args "50" or --args "50,100")')
     args = parser.parse_args()
 
     # ── Populate headless input queue ────────────────────────────
     if args.input:
         from src.ppl_emulator.runtime.engine import HPPrimeRuntime
         HPPrimeRuntime._pending_input_queue = args.input
+
+    # ── Populate EXPORT function entry arguments ──────────────────
+    if args.args:
+        from src.ppl_emulator.runtime.engine import HPPrimeRuntime
+        HPPrimeRuntime._entry_args = [a.strip() for a in args.args.split(',') if a.strip()]
 
     # ── Read source ──────────────────────────────────────────────
     filename = args.file or '<inline>'
@@ -407,6 +413,7 @@ Examples:
     finally:
         HPPrimeRuntime._compiled_mode = False  # reset for subsequent uses in same process
         HPPrimeRuntime._force_save_output_default = False
+        HPPrimeRuntime._entry_args = []
 
     # ── FINISHED banner ──────────────────────────────────────────
     print()

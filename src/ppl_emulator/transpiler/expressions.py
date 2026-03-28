@@ -128,6 +128,96 @@ def _ppl_to_py_slice(range_str):
     end_py   = _slice_bound(parts[1] if len(parts) > 1 else '', False)
     return f'{start_py}:{end_py}'
 
+def _split_top_level_args(s: str) -> list:
+    """Split s on commas that are at bracket-depth 0 (ignoring strings)."""
+    args: list = []
+    cur:  list = []
+    depth = 0
+    in_str = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '"':
+            in_str = not in_str
+            cur.append(ch)
+        elif not in_str and ch in '([{':
+            depth += 1
+            cur.append(ch)
+        elif not in_str and ch in ')]}':
+            depth -= 1
+            cur.append(ch)
+        elif not in_str and ch == ',' and depth == 0:
+            args.append(''.join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    if cur:
+        args.append(''.join(cur).strip())
+    return args
+
+
+def _rewrite_makelist_calls(e: str, line_no, known_vars) -> str:
+    """Find MAKELIST(expr, var, start, end[, step]) in e and rewrite expr as a lambda.
+
+    This allows the runtime to iterate over the range and evaluate the expression
+    for each value of var, correctly handling non-constant expressions like i^2.
+    """
+    # Find each MAKELIST( invocation
+    out: list[str] = []
+    i = 0
+    while i < len(e):
+        # Look for MAKELIST(
+        m = re.search(r'\bMAKELIST\s*\(', e[i:], re.IGNORECASE)
+        if not m:
+            out.append(e[i:])
+            break
+        # Append everything before MAKELIST
+        out.append(e[i: i + m.start()])
+        i += m.start() + len(m.group())
+
+        # Find the matching closing paren
+        depth = 1
+        j = i
+        in_str = False
+        while j < len(e) and depth > 0:
+            ch = e[j]
+            if ch == '"':
+                in_str = not in_str
+            elif not in_str:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+            j += 1
+        inner = e[i: j - 1]  # content between the parens
+        i = j  # advance past closing )
+
+        ml_args = _split_top_level_args(inner)
+        if len(ml_args) >= 4:
+            expr_raw  = ml_args[0]
+            var_raw   = ml_args[1].strip()
+            start_raw = ml_args[2]
+            end_raw   = ml_args[3]
+            step_raw  = ml_args[4] if len(ml_args) >= 5 else '1'
+
+            # Derive the PPL variable name (strip array index, take identifier)
+            var_upper = re.match(r'[A-Za-z_]\w*', var_raw)
+            var_upper = var_upper.group(0).upper() if var_upper else var_raw.upper()
+
+            # Transform each part
+            expr_py  = _xform(expr_raw,  line_no, known_vars)
+            start_py = _xform(start_raw, line_no, known_vars)
+            end_py   = _xform(end_raw,   line_no, known_vars)
+            step_py  = _xform(step_raw,  line_no, known_vars)
+
+            out.append(f"MAKELIST(lambda: {expr_py}, '{var_upper}', {start_py}, {end_py}, {step_py})")
+        else:
+            # Fewer than 4 args — pass through unchanged
+            out.append(f"MAKELIST({inner})")
+    return ''.join(out)
+
+
 def _xform(expr, line_no=None, known_vars=None):
     """Transform a PPL expression to valid Python, respecting strings."""
     parts, buf, in_str, i = [], [], False, 0
@@ -166,6 +256,12 @@ def _xform(expr, line_no=None, known_vars=None):
             res.append(f'PPLString("{_escape_content(content)}")')  # type: ignore
         else:
             e = val
+            # Rewrite MAKELIST(expr, var, start, end) → MAKELIST(lambda: expr, 'VAR', start, end)
+            # so the runtime can evaluate expr iteratively with the loop variable set correctly.
+            if re.search(r'\bMAKELIST\s*\(', e, re.IGNORECASE):
+                e = _rewrite_makelist_calls(e, line_no, known_vars)
+                res.append(e)
+                continue
             # { } or [ ] -> COERCE([ ]) for list literals; subscript [ ] are left as-is.
             # A single stack-based pass tracks each bracket's origin so the closer
             # only adds ')' when the matching opener was a list literal (not a subscript).

@@ -233,8 +233,16 @@ class Transpiler:
 
     def _emit_footer(self, out_path):
         if self._export:
-            args = ", ".join(["0"] * len(self._export_params))
-            self._emit0(f"{self._export}({args})")
+            nparams = len(self._export_params)
+            if nparams > 0:
+                # Pull runtime-supplied entry args (from --args flag); fall back to 0
+                args = ", ".join(f"_rt._get_entry_arg({i})" for i in range(nparams))
+            else:
+                args = ""
+            self._emit0(f"_ppl_result = {self._export}({args})")
+            # If the function returned a value, display it (mirrors HP Prime home-screen history)
+            self._emit0("if _ppl_result is not None:")
+            self._emit0(f"    _rt.PRINT(_ppl_result)")
         self._emit0(f"_rt.save({repr(out_path)})")
 
     # ─────────────────────────────────────────────────────────────────
