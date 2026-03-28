@@ -49,6 +49,25 @@ if _APP_ROOT not in sys.path:
 from src.ppl_emulator.transpiler.core import Transpiler  # pyre-ignore
 
 
+# ── Builtins where shadowing with a variable name is genuinely dangerous ─────
+# Utility converters (NUM, STR, REAL, INTEGER, TYPE, SIZE, …) and short math
+# names (MAX, MIN, ABS, …) are commonly used as variable names in calculator
+# programs and produce only noise when flagged.  This curated set covers only
+# the functions a user is very likely to call later in the same program, making
+# an accidental shadow a real bug rather than a style choice.
+_CRITICAL_SHADOW_BUILTINS: frozenset = frozenset([
+    # I/O — clobbering these breaks all output
+    'PRINT', 'DISP', 'INPUT', 'CHOOSE', 'MSGBOX', 'GETKEY', 'WAIT',
+    # Graphics — very commonly called; shadowing silently breaks drawing
+    'RECT', 'RECT_P', 'LINE', 'LINE_P', 'PIXON', 'PIXON_P',
+    'TEXTOUT_P', 'CIRCLE_P', 'FILLCIRCLE_P', 'RGB',
+    # Core trig / math that every calculator program relies on
+    'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN',
+    'SQRT', 'LOG', 'LN', 'EXP',
+    # List / string ops people call constantly
+    'SIZE', 'CONCAT', 'SORT', 'REVERSE', 'MAKELIST',
+])
+
 # ── Known HP Prime built-in functions with argument counts (min, max) ────────
 BUILTIN_ARGS = {
     # I/O
@@ -485,10 +504,10 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         if m2:
             vname = m2.group(1)
             vup = vname.upper()
-            if vup in BUILTINS or vup in _STRUCTURAL:
+            if vup in _CRITICAL_SHADOW_BUILTINS:
                 issues.append(Issue(i, 'WARNING', f"Shadowing built-in '{vname}' with assignment — valid in PPL but may hide the built-in", line))
             assigned_vars.add(vup)
-            
+
         # Track LOCAL variables
         m_local = re.match(r'^LOCAL\s+(.+?);?\s*$', line, re.IGNORECASE)
         _is_local_fn = bool(re.match(r'^LOCAL\s+\w+\s*\(', line, re.IGNORECASE)) and ':=' not in line.split('(')[0]
@@ -497,7 +516,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             for m_var in re.finditer(r'\b([A-Za-z_]\w*)\b', lhs_part):
                 var_name = m_var.group(1)
                 vup = var_name.upper()
-                if vup in BUILTINS or vup in _STRUCTURAL:
+                if vup in _CRITICAL_SHADOW_BUILTINS:
                     issues.append(Issue(i, 'WARNING', f"Shadowing built-in '{var_name}' in LOCAL declaration — valid in PPL", line))
                 local_vars.add(vup)
                 if curr_pass1_fn:
@@ -616,13 +635,43 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         # Erase string contents so quoted brackets don't affect balance counts
         erased_stmt = _erase_strings(combined_stmt)
         
-        # Balance check — keep accumulating if the statement is not yet complete
+        # Balance check — keep accumulating if the statement is not yet complete.
+        # Critical rule: if a semicolon is already present the statement is
+        # terminated by PPL syntax.  Continuing to accumulate in that case would
+        # swallow every subsequent line of the file into one giant buffer,
+        # hiding all further errors and corrupting block-stack tracking.
+        # Instead, flush immediately and emit a bracket-mismatch error.
         paren_balance = erased_stmt.count('(') - erased_stmt.count(')')
         brace_balance = erased_stmt.count('{') - erased_stmt.count('}')
         trailing_op = bool(re.search(
             r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*$', erased_stmt, re.IGNORECASE))
-        if paren_balance > 0 or brace_balance > 0 or combined_stmt.endswith(',') or combined_stmt.endswith(':=') or trailing_op:
+        has_stmt_end = ';' in erased_stmt
+        if not has_stmt_end and (paren_balance > 0 or brace_balance > 0
+                                 or combined_stmt.endswith(',')
+                                 or combined_stmt.endswith(':=')
+                                 or trailing_op):
             continue
+        # Report bracket imbalances detected on an already-terminated statement.
+        if paren_balance > 0:
+            _n = paren_balance
+            err(stmt_start_ln,
+                f'Unclosed "(" — {_n} unmatched opening parenthes{"is" if _n == 1 else "es"} in expression.',
+                proc_lines[stmt_start_ln - 1])
+        elif paren_balance < 0:
+            _n = -paren_balance
+            err(stmt_start_ln,
+                f'Extra ")" — {_n} unmatched closing parenthes{"is" if _n == 1 else "es"} in expression.',
+                proc_lines[stmt_start_ln - 1])
+        if brace_balance > 0:
+            _n = brace_balance
+            err(stmt_start_ln,
+                f'Unclosed "{{" — {_n} unmatched opening brace{"" if _n == 1 else "s"} in expression.',
+                proc_lines[stmt_start_ln - 1])
+        elif brace_balance < 0:
+            _n = -brace_balance
+            err(stmt_start_ln,
+                f'Extra "}}" — {_n} unmatched closing brace{"" if _n == 1 else "s"} in expression.',
+                proc_lines[stmt_start_ln - 1])
             
         # We have a complete (at least one) statement structure.
         # Now split by semicolon, but NOT inside strings or nested blocks.
@@ -1062,7 +1111,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                             dp = re.sub(r'^LOCAL\b', '', dp, flags=re.IGNORECASE).strip()
                             for mv in re.finditer(r'\b([A-Za-z_]\w*)\b', dp):
                                 v = mv.group(1).upper()
-                                if (v in BUILTINS or v in _STRUCTURAL) and v not in _warned_shadows:
+                                if v in _CRITICAL_SHADOW_BUILTINS and v not in _warned_shadows:
                                     _warned_shadows.add(v)
                                     warn(curr_ln, f'Shadowing keyword "{v}"', display)
                                 if v in _RESERVED_GLOBALS and v not in _warned_shadows:
