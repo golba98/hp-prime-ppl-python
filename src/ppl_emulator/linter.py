@@ -617,9 +617,10 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     current_fn:  Optional[str]  = None
     fn_start_ln: int  = 0
     used_locals_in_fn: Set[str] = set()
-    
+
     # Logic tracking
     assigned_vars_in_fn: Set[str] = set()
+    concat_hits_in_fn: Dict[str, int] = {}
     active_for_counters: List[str] = [] # Stack of currently active FOR loop variables
     case_default_stack: List[bool] = []  # per-function CASE tracking
     unreachable_flag:    bool = False
@@ -931,9 +932,22 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 # Find content inside quotes
                 for m_str in re.finditer(r'"(.*?)"', clean):
                     s_content = m_str.group(1)
+                    if len(s_content) > 4096:
+                        warn(
+                            curr_ln,
+                            "Very large string literal detected (>4 KB). This may exhaust emulator memory or stall execution.",
+                            display,
+                        )
                     # Check for \ followed by anything not in [n, r, t, ", \]
                     for m_esc in re.finditer(r'\\([^nrt"\\])', s_content):
                         err(curr_ln, f"Invalid escape sequence '\\{m_esc.group(1)}' in string literal.", display)
+
+            if re.match(r'^\s*WHILE\s+(?:1|TRUE)\b', safe, re.IGNORECASE):
+                warn(
+                    curr_ln,
+                    "WHILE condition is constant-true. This can run indefinitely unless a BREAK is reachable.",
+                    display,
+                )
 
             # ── Expression-level checks ───────────────────────────────────────
             # These were previously in a separate line-based loop.
@@ -1259,6 +1273,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         used_locals_in_fn = set()
                         declared_in_fn_pass2 = set()
                         assigned_vars_in_fn = set()
+                        concat_hits_in_fn = {}
                         for _p in _lfn.group(2).split(','):
                             _p = _p.strip().upper()
                             if _p: assigned_vars_in_fn.add(_p)
@@ -1376,7 +1391,21 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
 
                 if target:
                     _is_valid_lhs(target, curr_ln, issues, display)
-                    
+
+                    if current_fn:
+                        lhs_name = re.match(rf'^({_IDENT})', target)
+                        if lhs_name:
+                            rhs_expr = safe[pos + 2:].strip()
+                            if re.match(rf'^{lhs_name.group(1)}\s*(?:\+|CONCAT\s*\()', rhs_expr, re.IGNORECASE):
+                                lhs_up = lhs_name.group(1).upper()
+                                concat_hits_in_fn[lhs_up] = concat_hits_in_fn.get(lhs_up, 0) + 1
+                                if concat_hits_in_fn[lhs_up] >= 3:
+                                    warn(
+                                        curr_ln,
+                                        f"Repeated concatenation on '{lhs_name.group(1)}' can grow memory quickly; consider building a list or limiting the loop.",
+                                        display,
+                                    )
+
                     # Track assignment to avoid "used before assigned"
                     var_match = re.match(rf'^({_IDENT})', target)
                     if var_match and current_fn:
@@ -1544,6 +1573,14 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     expected = defined_fn_args[func_name]
                     if count != expected:
                         err(curr_ln, f'"{fg}" expects {expected} arguments, got {count}', display)
+                    elif current_fn and func_name == current_fn.upper():
+                        if re.search(r'\b(IF|CASE|WHILE|FOR|REPEAT|SWITCH|RETURN|THEN|ELSE|DO|UNTIL|BREAK|CONTINUE)\b', safe, re.IGNORECASE):
+                            continue
+                        warn(
+                            curr_ln,
+                            f"Direct recursion detected in '{fg}'. Deep recursion can exceed the emulator's call-depth budget.",
+                            display,
+                        )
                 
                 # Requirement 1: Unknown function whitelist check
                 elif func_name not in _STRUCTURAL and func_name != 'LOCAL' and func_name != 'EXPORT':

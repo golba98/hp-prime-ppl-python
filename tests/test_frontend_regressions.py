@@ -119,3 +119,34 @@ END;
     assert [i for i in issues if i.severity == "ERROR"] == []
     cli = _run_cli(code)
     assert cli.returncode == 0
+
+
+def test_direct_recursion_emits_warning():
+    code = """
+EXPORT T()
+BEGIN
+  T();
+END;
+"""
+    warnings = [i for i in lint(code, filename="recursive.hpprgm") if i.severity == "WARNING"]
+    assert any("recursion" in i.message.lower() for i in warnings)
+
+
+def test_large_string_literal_emits_warning():
+    code = "EXPORT T()\nBEGIN\nPRINT(\"" + ("x" * 5000) + "\");\nEND;\n"
+    warnings = [i for i in lint(code, filename="large_string.hpprgm") if i.severity == "WARNING"]
+    assert any("string literal" in i.message.lower() for i in warnings)
+
+
+def test_repeated_concatenation_emits_warning():
+    code = """
+EXPORT T()
+BEGIN
+  LOCAL s := "";
+  s := s + "a";
+  s := s + "b";
+  s := s + "c";
+END;
+"""
+    warnings = [i for i in lint(code, filename="concat.hpprgm") if i.severity == "WARNING"]
+    assert any("concatenation" in i.message.lower() for i in warnings)

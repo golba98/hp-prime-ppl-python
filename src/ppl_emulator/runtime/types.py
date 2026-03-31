@@ -1,3 +1,12 @@
+from src.ppl_emulator.runtime.resource_budget import get_active_budget
+
+
+def _budget_sync():
+    budget = get_active_budget()
+    if budget is not None and getattr(budget, "active", False):
+        budget.recalculate()
+
+
 class PPLVar:
     """Boxed PPL variable — wraps any value so it can be passed by reference.
 
@@ -44,6 +53,7 @@ class PPLVar:
 
     def __setitem__(self, i, val):
         self.value[i] = val
+        _budget_sync()
 
     def __call__(self, *args, **kwargs):
         # Allow boxed callables (e.g. a PPLList stored in a var) to be called directly.
@@ -101,16 +111,19 @@ class PPLList(list):
         if isinstance(i, slice):
             # Slices arrive pre-adjusted; pass through directly.
             super().__setitem__(i, val)
+            _budget_sync()
             return
         # 1-based: subtract 1.
         idx = int(i) - 1
         try:
             super().__setitem__(idx, val)
+            _budget_sync()
         except IndexError:
             # PPL automatically expands lists on out-of-bounds assignment.
             while len(self) <= idx:
                 self.append(0)
             super().__setitem__(idx, val)
+            _budget_sync()
 
     def __hash__(self):
         def make_hashable(obj):
@@ -127,20 +140,26 @@ class PPLList(list):
 
     def sort_inplace(self, reverse=False):
         super().sort(reverse=reverse)
+        _budget_sync()
         return self
 
     def insert(self, idx, val):
         # Already 1-based before this fix; kept as-is.
         super().insert(max(0, int(idx) - 1), val)
+        _budget_sync()
 
     def pop(self, idx=None):
         if idx is None:
             try:
-                return super().pop()
+                value = super().pop()
+                _budget_sync()
+                return value
             except IndexError:
                 return 0
         try:
-            return super().pop(int(idx) - 1)
+            value = super().pop(int(idx) - 1)
+            _budget_sync()
+            return value
         except IndexError:
             return 0
 
@@ -195,6 +214,7 @@ class PPLMatrix:
         if isinstance(key, tuple):
             r, c = key
             self._data[int(r) - 1][int(c) - 1] = value
+            _budget_sync()
         else:
             # Assign an entire row; dimensions must stay the same.
             row_idx = int(key) - 1
@@ -204,6 +224,7 @@ class PPLMatrix:
                         f"Matrix dimension mismatch: expected {self._cols} columns, got {len(value)}"
                     )
                 self._data[row_idx] = list(value)
+                _budget_sync()
             else:
                 raise TypeError("Matrix row must be a list")
 
@@ -350,6 +371,7 @@ class PPLString:
             v_str = str(val)
             chars[idx] = v_str[0] if v_str else " "
             self.data = "".join(chars)
+            _budget_sync()
         except (ValueError, TypeError):
             pass
 

@@ -22,6 +22,7 @@ try:
 except Exception:
     pygame = None
 from src.ppl_emulator.runtime.types import PPLList, PPLString, PPLVar, PPLMatrix
+from src.ppl_emulator.runtime.resource_budget import ResourceBudget, ResourceLimitExceeded
 from src.ppl_emulator.transpiler.constants import BUILTINS, _STRUCTURAL, _SYSTEM_GLOBALS
 from src.ppl_emulator.runtime.ppl_runtime import CAS, ppl_expr, DET
 
@@ -60,6 +61,8 @@ class HP_Grob:
         self.width = int(width)
         self.height = int(height)
         bg = runtime._color(color) if (color is not None and runtime) else (255, 255, 255)
+        if runtime is not None and getattr(runtime, "_budget", None) is not None and runtime._budget.active:
+            runtime._budget.account_value(self, runtime=runtime, label="grob")
         self.img = Image.new('RGB', (self.width, self.height), bg)
         self.draw = ImageDraw.Draw(self.img)
 
@@ -193,10 +196,14 @@ class ScopeStack:
 
     def push(self):
         self.stack.append({})
+        if self.runtime is not None and getattr(self.runtime, "_budget", None) is not None:
+            self.runtime._budget.push_block()
 
     def pop(self):
         if len(self.stack) > 1:
             self.stack.pop()
+        if self.runtime is not None and getattr(self.runtime, "_budget", None) is not None:
+            self.runtime._budget.pop_block()
 
     def get(self, name, line_no=None):
         name = name.upper()
@@ -269,6 +276,13 @@ class HPPrimeRuntime:
     _GETKEY_MAX_CALLS: int = 30
     _ISKEYDOWN_MAX_CALLS: int = 30
     _WAIT_MAX_CALLS: int = 10
+    _DEFAULT_TOTAL_BYTES: int = 32 * 1024 * 1024
+    _DEFAULT_SINGLE_OBJECT_BYTES: int = 8 * 1024 * 1024
+    _DEFAULT_OUTPUT_CHARS: int = 256 * 1024
+    _DEFAULT_CALL_DEPTH: int = 128
+    _DEFAULT_BLOCK_DEPTH: int = 128
+    _DEFAULT_LINE_EVENTS: int = 1_000_000
+    _DEFAULT_ELAPSED_SECONDS: float = 8.0
 
     @staticmethod
     def _stream_is_tty(stream) -> bool:
@@ -335,6 +349,15 @@ class HPPrimeRuntime:
         # Set to True once any explicit graphics call (RECT_P, LINE_P, etc.) is made.
         # When True, _render_terminal does NOT clear the screen so graphics are preserved.
         self._graphics_mode: bool = False
+        self._budget = ResourceBudget(
+            max_total_bytes=HPPrimeRuntime._DEFAULT_TOTAL_BYTES,
+            max_single_object_bytes=HPPrimeRuntime._DEFAULT_SINGLE_OBJECT_BYTES,
+            max_output_chars=HPPrimeRuntime._DEFAULT_OUTPUT_CHARS,
+            max_call_depth=HPPrimeRuntime._DEFAULT_CALL_DEPTH,
+            max_block_depth=HPPrimeRuntime._DEFAULT_BLOCK_DEPTH,
+            max_line_events=HPPrimeRuntime._DEFAULT_LINE_EVENTS,
+            max_elapsed_seconds=HPPrimeRuntime._DEFAULT_ELAPSED_SECONDS,
+        )
         self.CAS    = CAS(self)
         self.Finance = _FinanceMock()
         self._fn_registry: dict[str, int] = {}
@@ -351,6 +374,7 @@ class HPPrimeRuntime:
         self._refresh_catalog_vars()
         self.SET_VAR('APROGRAM', PPLString(''))
         self.SET_VAR('MYLANGS', _coerce_list([]))
+        self._budget.activate(self)
 
         # Initialize pygame window if available.
         if pygame is not None and self._should_enable_pygame():
@@ -440,6 +464,9 @@ class HPPrimeRuntime:
 
     def SET_VAR(self, name, value, is_local=False):
         self.scopes.set(name, value, is_local)
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_value(self._val(value), runtime=self, label=str(name))
+            self._budget.recalculate(self)
         self._refresh_catalog_vars()
 
     def _val(self, x):
@@ -489,6 +516,8 @@ class HPPrimeRuntime:
         rendered = str(text)
         self._safe_console_print(rendered)
         self._terminal_lines.append(rendered)
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_output(rendered, self)
         return rendered
 
     def _assign_expr(self, name, value, line_no=None):
@@ -1073,6 +1102,8 @@ class HPPrimeRuntime:
         if args:
             self._set_ans(args[0] if len(args) == 1 else PPLString(text))
         self._terminal_lines.append(text)
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_output(text, self)
         if mode in ('both', 'screen'):
             if self._pg_enabled and pygame is not None and self._pg_screen is not None:
                 self._render_terminal()
@@ -1141,6 +1172,8 @@ class HPPrimeRuntime:
         if mode in ('both', 'terminal'):
             self._safe_console_print(text)
         self._terminal_lines.append(text)
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_output(text, self)
         if mode in ('both', 'screen'):
             if self._pg_enabled and pygame is not None and self._pg_screen is not None:
                 self._render_terminal()
@@ -2194,15 +2227,23 @@ class HPPrimeRuntime:
     def REVERSE(self, obj):
         if isinstance(obj, PPLVar): obj = obj.value
         if isinstance(obj, list):
-            return PPLList(reversed(obj))
+            result = PPLList(reversed(obj))
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(result, runtime=self, label="reversed list")
+            return result
         if isinstance(obj, str):
-            return str(obj)[::-1]
+            result = str(obj)[::-1]
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(result, runtime=self, label="reversed string")
+            return result
         return obj
 
     def ADDTAIL(self, obj, val):
         if isinstance(obj, PPLVar): obj = obj.value
         if isinstance(obj, list):
             obj.append(val)
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.recalculate(self)
         return obj
     def APPEND(self, obj, val): return self.ADDTAIL(obj, val)
     def HEAD(self, obj):
@@ -2215,9 +2256,15 @@ class HPPrimeRuntime:
     def TAIL(self, obj):
         if isinstance(obj, PPLVar): obj = obj.value
         if isinstance(obj, (PPLString, str)):
-            return PPLString(str(obj)[1:])
+            result = PPLString(str(obj)[1:])
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(result, runtime=self, label="string tail")
+            return result
         if isinstance(obj, (PPLList, list, tuple)):
-            return PPLList(list(obj)[1:])
+            result = PPLList(list(obj)[1:])
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(result, runtime=self, label="list tail")
+            return result
         return obj
     def MAKEMAT(self, *args):
         if len(args) == 2:
@@ -2230,7 +2277,10 @@ class HPPrimeRuntime:
             raise PPLError("MAKEMAT() expects 2 or 3 arguments.")
         rows_i = max(0, int(float(self._val(rows))))
         cols_i = max(0, int(float(self._val(cols))))
-        return PPLMatrix([[value for _ in range(cols_i)] for _ in range(rows_i)])
+        result = PPLMatrix([[value for _ in range(cols_i)] for _ in range(rows_i)])
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_value(result, runtime=self, label="matrix")
+        return result
     def MAT2LIST(self, obj):
         if isinstance(obj, PPLVar): obj = obj.value
         if isinstance(obj, PPLMatrix):
@@ -2262,14 +2312,23 @@ class HPPrimeRuntime:
                     out.extend(list(value))
                 else:
                     out.append(value)
-            return PPLList(out)
-        return ''.join(str(v) for v in values)
+            result = PPLList(out)
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(result, runtime=self, label="concatenated list")
+            return result
+        result = ''.join(str(v) for v in values)
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_value(result, runtime=self, label="concatenated string")
+        return result
     def POS(self, target, pattern): return self.INSTRING(target, pattern)
     def UPPER(self, s): return str(s).upper()
     def LOWER(self, s): return str(s).lower()
     def TEXT_CLEAR(self):
         self._terminal_lines.clear()
         self._graphics_mode = False
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget._snapshot.output_chars = 0
+            self._budget.recalculate(self)
         self.RECT()
         return 1
     def TEXT_AT(self, row, col, text):
@@ -2285,6 +2344,8 @@ class HPPrimeRuntime:
         suffix_start = col_idx - 1 + len(rendered)
         suffix = line[suffix_start:] if len(line) > suffix_start else ""
         self._terminal_lines[row_idx - 1] = prefix + rendered + suffix
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.recalculate(self)
         self._render_terminal()
         return len(rendered)
     def STRING(self, x, precision=None):
@@ -2367,10 +2428,16 @@ class HPPrimeRuntime:
                 if var_name:
                     self.SET_VAR(str(var_name), i)
                 result.append(expr())
-            return PPLList(result)
+            out = PPLList(result)
+            if getattr(self, "_budget", None) is not None and self._budget.active:
+                self._budget.account_value(out, runtime=self, label="makelist result")
+            return out
         # Constant expression — just repeat the value
         val = expr.value if isinstance(expr, PPLVar) else (expr if expr is not None else 0)
-        return PPLList([val] * max(0, len(indices)))
+        out = PPLList([val] * max(0, len(indices)))
+        if getattr(self, "_budget", None) is not None and self._budget.active:
+            self._budget.account_value(out, runtime=self, label="makelist result")
+        return out
     def EVAL(self, x): return self.EXPR(x)
     def sto(self, *args): return args[0] if args else 0
 
@@ -2389,6 +2456,8 @@ class HPPrimeRuntime:
         return False
 
     def close(self):
+        if getattr(self, "_budget", None) is not None:
+            self._budget.deactivate()
         if self._pg_enabled and pygame is not None:
             try:
                 pygame.display.quit()

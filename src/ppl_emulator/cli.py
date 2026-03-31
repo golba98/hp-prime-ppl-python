@@ -242,6 +242,15 @@ def _show_lint_report(filename: str, source: str, issues: list) -> None:
 def _show_runtime_error(filename: str, exc: Exception, py_code: str) -> None:
     """Print a runtime crash in a readable way."""
     short = os.path.basename(filename) if filename else '<code>'
+    from src.ppl_emulator.runtime.resource_budget import ResourceLimitExceeded
+    if isinstance(exc, ResourceLimitExceeded):
+        print(f'  {_CLR_RED}{_CLR_BLD}runtime error:{_CLR_RST} {_CLR_BLD}resource limit exceeded{_CLR_RST}')
+        print(f'     {_CLR_BLU}-->{_CLR_RST} {_CLR_GRY}{filename}{_CLR_RST}')
+        print()
+        print(f'  {_CLR_RED}{type(exc).__name__}:{_CLR_RST} {exc}')
+        print()
+        _divider()
+        return
     print(f'  {_CLR_RED}{_CLR_BLD}runtime error:{_CLR_RST} {_CLR_BLD}{short}{_CLR_RST}')
     print(f'     {_CLR_BLU}-->{_CLR_RST} {_CLR_GRY}{filename}{_CLR_RST}')
     print()
