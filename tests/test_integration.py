@@ -32,6 +32,7 @@ sys.path.insert(0, APP_DIR)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.ppl_emulator.transpiler import transpile  # pyre-ignore
 from src.ppl_emulator.linter import lint, lint_summary  # pyre-ignore
+from src.ppl_emulator.source_loader import read_ppl_file  # pyre-ignore
 
 # ── Discover all .hpprgm files ────────────────────────────────────────────────
 
@@ -76,39 +77,6 @@ class _FallbackNS(dict):
             print(f"[WARN] undefined symbol '{key}' — skipped", file=sys.stderr)
             return 0
         return _stub
-
-
-def _read_ppl_file(filepath):
-    """Read a .hpprgm file, handling UTF-16 / binary HP Prime format."""
-    with open(filepath, 'rb') as f:
-        sample = f.read(200)
-    null_count = sum(1 for b in sample if b == 0)
-    if null_count > 10:
-        with open(filepath, 'rb') as f:
-            raw_bytes = f.read()
-        text = raw_bytes.decode('utf-16-le', errors='replace')
-        # Remove duplicate CRs and Unicode replacement chars
-        text = text.replace(chr(0x0D) + chr(0x0D), chr(0x0D))
-        text = text.replace(chr(0xFFFD), '')
-        text = text.replace(chr(0x0D0D), '')
-        text = text.replace(chr(0), '')  # strip embedded null bytes
-        # Filter binary garbage: keep ASCII + known PPL Unicode operators/Greek
-        _ppl_ok = frozenset('≠≤≥▶→⇒π°²³')
-        text = ''.join(c if (0x20 <= ord(c) < 0x100 or ord(c) in (9, 10, 13)) or c in _ppl_ok or 0x370 <= ord(c) <= 0x3FF else ' ' for c in text)
-        # Strip trailing binary garbage from each line (backtick not valid in PPL)
-        text = chr(10).join(l.split('`')[0].rstrip() for l in text.splitlines())
-        # Find where actual PPL code starts
-        ppl_start = -1
-        for pat in ['#pragma', '// ', 'EXPORT ', 'export ']:
-            idx = text.find(pat)
-            if idx != -1 and (ppl_start == -1 or idx < ppl_start):
-                ppl_start = idx
-        if ppl_start > 0:
-            text = text[ppl_start:]
-        return text
-    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
-
 
 
 def stage_execute(filepath, py_code):
@@ -158,18 +126,38 @@ def check_expected(filepath, stdout):
 
 ALL_FILES = find_all_hpprgm()
 
+_KNOWN_NONRUNNABLE_ASSETS = {
+    '59-Programming Helper/Catalog.hpprgm',
+    '59-Programming Helper/Programming_Helper.hpprgm',
+}
+
+_KNOWN_UNSUPPORTED_PROGRAMS = {
+}
+
 
 def _is_lint_test_fixture(ppl_code):
     """Return True if file is a lint test fixture that intentionally contains errors."""
     return '// @lint-test' in ppl_code[:200]
 
 
+def _skip_reason_for_file(filepath: str, ppl_code: str) -> str | None:
+    rel = label(filepath)
+    if rel in _KNOWN_NONRUNNABLE_ASSETS:
+        return 'Reference asset — not a runnable PPL program'
+    if rel in _KNOWN_UNSUPPORTED_PROGRAMS:
+        return 'Known unsupported advanced app-program'
+    if _is_lint_test_fixture(ppl_code):
+        return 'Lint test fixture — intentionally contains errors'
+    return None
+
+
 @pytest.mark.parametrize('filepath', ALL_FILES, ids=[label(f) for f in ALL_FILES])
 def test_hpprgm(filepath):
     """Stage 1 lint → Stage 2 transpile → Stage 3 execute."""
-    ppl_code = _read_ppl_file(filepath)
-    if _is_lint_test_fixture(ppl_code):
-        pytest.skip('Lint test fixture — intentionally contains errors')
+    ppl_code = read_ppl_file(filepath)
+    skip_reason = _skip_reason_for_file(filepath, ppl_code)
+    if skip_reason:
+        pytest.skip(skip_reason)
 
     out_png = os.path.join(tempfile.gettempdir(), '_ppl_test_screen.png')
 
@@ -224,7 +212,7 @@ def main():
         py_code = ''
 
         try:
-            ppl_code = _read_ppl_file(filepath)
+            ppl_code = read_ppl_file(filepath)
 
             out_png = os.path.join(tempfile.gettempdir(), '_ppl_test_screen.png')
 

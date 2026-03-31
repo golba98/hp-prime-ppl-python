@@ -31,6 +31,7 @@ if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
 from src.ppl_emulator.linter import lint  # pyre-ignore
+from src.ppl_emulator.source_loader import read_ppl_file  # pyre-ignore
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -340,8 +341,7 @@ Examples:
         ppl_code = args.code
     elif args.file:
         try:
-            with open(args.file, 'r', encoding='utf-8', errors='replace') as f:
-                ppl_code = f.read()
+            ppl_code = read_ppl_file(args.file)
         except FileNotFoundError:
             print(f'  {_CLR_RED}{_CLR_BLD}error:{_CLR_RST} File not found: {_CLR_BLD}{args.file}{_CLR_RST}')
             sys.exit(1)
@@ -422,7 +422,7 @@ Examples:
     finally:
         HPPrimeRuntime._compiled_mode = False  # reset for subsequent uses in same process
         HPPrimeRuntime._force_save_output_default = False
-        HPPrimeRuntime._entry_args = []
+        HPPrimeRuntime._entry_args = None
         HPPrimeRuntime._print_mode = 'both'
 
     # ── FINISHED banner ──────────────────────────────────────────

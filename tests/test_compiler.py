@@ -294,6 +294,34 @@ class TestFunctions:
         out, _, _ = run_ppl(code)
         assert "120" in out
 
+    def test_makelist_string_expression_transpiles_and_executes(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL tokensSize := 3;
+          LOCAL k;
+          LOCAL tokens := MAKELIST("", k, 1, tokensSize);
+          PRINT(SIZE(tokens));
+          PRINT(tokens(1) == "");
+        END;
+        """
+        out, _, py = run_ppl(code)
+        assert "MAKELIST(lambda: PPLString(\"\")" in py
+        lines = printed_lines(out)
+        assert lines == ["3", "True"]
+
+    def test_postfix_factorial_on_variable_transpiles_and_executes(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL x := 5;
+          PRINT(x!);
+        END;
+        """
+        out, _, py = run_ppl(code)
+        assert "120" in out
+        assert "math.factorial" in py
+
 
 # ── Built-in math function tests ─────────────────────────────────
 
@@ -813,6 +841,89 @@ class TestLocalFunctions:
         assert not param_warnings, f"False unused-param warnings: {param_warnings}"
         out, _, _ = run_ppl(code)
         assert "7" in printed_lines(out)
+
+    def test_unicode_identifier_assignments_transpile_and_execute(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL ρ:=0;
+          ρ:=ρ+1;
+          PRINT(ρ);
+        END;
+        """
+        py = transpile(code)
+        assert "_rt.SET_VAR('Ρ', 0, is_local=True)" in py
+        out, _, _ = run_ppl(code)
+        assert printed_lines(out) == ["1"]
+
+    def test_store_operator_supports_indexed_targets(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL L:={0,0,0};
+          7▶L(2);
+          PRINT(L(2));
+        END;
+        """
+        py = transpile(code)
+        assert ".value[2] = 7" in py
+        out, _, _ = run_ppl(code)
+        assert printed_lines(out) == ["7"]
+
+    def test_module_scope_variables_are_known_inside_local_functions(self):
+        code = """
+        LOCAL lines:={"abc"};
+        LOCAL F()
+        BEGIN
+          PRINT(lines(1));
+        END;
+        EXPORT T()
+        BEGIN
+          F();
+        END;
+        """
+        py = transpile(code)
+        assert "_rt.GET_VAR('LINES'" in py
+        out, _, _ = run_ppl(code)
+        assert printed_lines(out) == ["abc"]
+
+    def test_inline_if_with_store_operator_else_branch_transpiles(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL s;
+          IF 1==1 THEN "A"▶s ELSE "B"▶s;END;
+          PRINT(s);
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert printed_lines(out) == ["A"]
+
+    def test_split_line_if_header_followed_by_inline_else_body_transpiles(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          LOCAL s,f:=1;
+          IF 1==1 THEN
+          "A"▶s;f+1▶f ELSE "B"▶s;END;
+          PRINT(s);
+        END;
+        """
+        out, _, _ = run_ppl(code)
+        assert printed_lines(out) == ["A"]
+
+    def test_not_equal_does_not_rewrite_as_factorial(self):
+        code = """
+        EXPORT T()
+        BEGIN
+          WHILE GETKEY() != 4 DO
+            RETURN 1;
+          END;
+        END;
+        """
+        py = transpile(code)
+        assert "_ppl_factorial(GETKEY())" not in py
+        assert "!= 4" in py or "!=4" in py
 
 
 if __name__ == "__main__":

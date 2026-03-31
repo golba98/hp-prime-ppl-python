@@ -1,3 +1,4 @@
+// @lint-test — intentionally invalid: tests linter detection
 EXPORT TEST_STRICT()
 BEGIN
   // 1. Unknown function (FILLRECT instead of RECT_P)

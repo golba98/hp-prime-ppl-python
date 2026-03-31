@@ -40,142 +40,29 @@ import os
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional, Tuple, Any, cast
 
+from src.ppl_emulator.hpprime_specs import (
+    ASSIGNMENT_RESERVED as _ASSIGNMENT_RESERVED,
+    BUILTIN_NAMES as BUILTINS,
+    COMMAND_ARITY as BUILTIN_ARGS,
+    command_accepts_arity,
+    command_expected_arity,
+    CRITICAL_SHADOW_BUILTINS as _CRITICAL_SHADOW_BUILTINS,
+    STRUCTURAL_KEYWORDS as _STRUCTURAL,
+)
+
 # ── Ensure 0-App root is on sys.path (works both as script and -m module) ──
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # .../src/ppl_emulator
 _APP_ROOT   = os.path.dirname(os.path.dirname(_SCRIPT_DIR)) # .../0-App
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
-from src.ppl_emulator.transpiler.core import Transpiler  # pyre-ignore
 
-
-# ── Builtins where shadowing with a variable name is genuinely dangerous ─────
-# Utility converters (NUM, STR, REAL, INTEGER, TYPE, SIZE, …) and short math
-# names (MAX, MIN, ABS, …) are commonly used as variable names in calculator
-# programs and produce only noise when flagged.  This curated set covers only
-# the functions a user is very likely to call later in the same program, making
-# an accidental shadow a real bug rather than a style choice.
-_CRITICAL_SHADOW_BUILTINS: frozenset = frozenset([
-    # I/O — clobbering these breaks all output
-    'PRINT', 'DISP', 'INPUT', 'CHOOSE', 'MSGBOX', 'GETKEY', 'WAIT',
-    # Graphics — very commonly called; shadowing silently breaks drawing
-    'RECT', 'RECT_P', 'LINE', 'LINE_P', 'PIXON', 'PIXON_P',
-    'TEXTOUT_P', 'CIRCLE_P', 'FILLCIRCLE_P', 'RGB',
-    # Core trig / math that every calculator program relies on
-    'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN',
-    'SQRT', 'LOG', 'LN', 'EXP',
-    # List / string ops people call constantly
-    'SIZE', 'CONCAT', 'SORT', 'REVERSE', 'MAKELIST',
-])
-
-# ── Known HP Prime built-in functions with argument counts (min, max) ────────
-BUILTIN_ARGS = {
-    # I/O
-    'PRINT': (0, 100),
-    'MSGBOX': (1, 1),
-    'INPUT': (1, 6),
-    'CHOOSE': (2, 100),
-    'WAIT': (0, 1),
-    'GETKEY': (0, 0),
-    'ISKEYDOWN': (1, 1),
-    'MOUSE': (0, 1),
-    'DISP_FREEZE': (0, 0),
-    'FREEZE': (0, 0),
-    # Graphics
-    'RECT': (0, 7),
-    'RECT_P': (0, 7),
-    'LINE': (4, 7),
-    'LINE_P': (4, 7),
-    'PIXON': (2, 5),
-    'PIXON_P': (2, 5),
-    'CIRCLE_P': (3, 6),
-    'FILLCIRCLE_P': (3, 6),
-    'ARC_P': (3, 8),
-    'TEXTOUT_P': (3, 8),
-    'DRAWMENU': (0, 6),
-    'BLIT': (3, 11),
-    'BLIT_P': (0, 12),
-    'SUBGROB': (5, 7),
-    'INVERT_P': (0, 6),
-    'GROB': (3, 5),
-    'DIMGROB_P': (3, 4),
-    'FILLPOLY_P': (2, 4),
-    'TRIANGLE_P': (2, 4),
-    # Color / math
-    'RGB': (3, 4),
-    'IP': (1, 1),
-    'FP': (1, 1),
-    'ABS': (1, 1),
-    'MAX': (1, 100), 'MIN': (1, 100), 'FLOOR': (1, 1), 'CEILING': (1, 1), 'ROUND': (2, 2),
-    'SQ': (1, 1), 'SQRT': (1, 1), 'LOG': (1, 1), 'LN': (1, 1), 'EXP': (1, 1),
-    'SIN': (1, 1), 'COS': (1, 1), 'TAN': (1, 1), 'ASIN': (1, 1), 'ACOS': (1, 1),
-    'ATAN': (1, 1), 'IFTE': (3, 3), 'EXPR': (1, 2),
-    'BITAND': (2, 2), 'BITOR': (2, 2), 'BITXOR': (2, 2), 'BITNOT': (1, 1),
-    # String
-    'SIZE': (1, 1), 'DIM': (1, 1), 'POS': (2, 2), 'MID': (2, 3), 'LEFT': (2, 2),
-    'RIGHT': (2, 2), 'UPPER': (1, 1), 'LOWER': (1, 1), 'STRING': (1, 2),
-    'NUM': (1, 1), 'TYPE': (1, 1), 'ASC': (1, 1), 'CHR': (1, 1), 'CONCAT': (2, 2),
-    'INSTRING': (2, 3), 'REPLACE': (3, 4), 'INSERT': (3, 3), 'CHAR': (1, 1),
-    'EXACT': (1, 1), 'QUO': (2, 2), 'REM': (2, 2),
-    # CAS
-    'CAS.diff': (2, 2),
-    'CAS.integrate': (2, 2),
-    # List / matrix
-    'MAKELIST': (4, 4),
-    'MAKEMATRIX': (2, 3),
-    'ADDROW': (3, 3),
-    'DELROW': (2, 2),
-    'ADDCOL': (3, 3),
-    'DELCOL': (2, 2),
-    'RANDINT': (2, 2),
-    'RANDOM': (0, 2),
-    'SORT': (1, 2),
-    # New builtins
-    'INTEGER': (1, 1),
-    'REAL': (1, 1),
-    'SIGN': (1, 1),
-    'TRUNCATE': (1, 2),
-    'MANT': (1, 1),
-    'XPON': (1, 1),
-    'BITSHIFT': (2, 2),
-    'ADDTAIL': (2, 2),
-    'SIGMALIST': (1, 1),
-    'PILIST': (1, 1),
-    'TRIM': (1, 1),
-    'STARTSWITH': (2, 2),
-    'ENDSWITH': (2, 2),
-    'CONTAINS': (2, 2),
-    'DISP': (1, 2),
-    'REVERSE': (1, 1),
-}
-
-BUILTINS: frozenset = frozenset(BUILTIN_ARGS.keys())
-
-# Valid HP Prime G1/G2 pixel-mode drawing commands (hardware whitelist)
-_GRAPHICS_WHITELIST: frozenset = frozenset([
-    'RECT_P', 'LINE_P', 'TEXTOUT_P', 'PIXON_P', 'PIXOFF_P', 'ARC_P', 'FILLPOLY_P',
-])
 
 # Graphics commands rejected with specific corrective guidance
 _REJECTED_GRAPHICS: dict = {
     'FILLRECT_P': "Error: Unknown command 'FILLRECT_P'. Use 'RECT_P' with a fill color argument for hardware compatibility.",
     'FILLRECT':   "Error: Unknown command 'FILLRECT'. Use 'RECT_P' with a fill color argument for hardware compatibility.",
 }
-
-# PPL structural keywords — never callable as user functions
-_STRUCTURAL: frozenset = frozenset([
-    'IF', 'THEN', 'ELSE', 'END', 'FOR', 'FROM', 'TO', 'STEP', 'DO',
-    'WHILE', 'REPEAT', 'UNTIL', 'RETURN', 'BREAK', 'CONTINUE',
-    'LOCAL', 'BEGIN', 'EXPORT', 'PROCEDURE',
-    'AND', 'OR', 'NOT', 'MOD', 'DIV', 'XOR',
-    'CASE', 'DEFAULT'
-])
-
-# Contextual keywords valid as variable names (only special inside loop headers)
-_CONTEXTUAL_KEYWORDS: frozenset = frozenset(['FROM', 'TO', 'STEP', 'DO'])
-
-# Keywords truly reserved as assignment targets (cannot be variable names)
-_ASSIGNMENT_RESERVED: frozenset = _STRUCTURAL - _CONTEXTUAL_KEYWORDS
 
 # PPL-specific Unicode operators that are valid on HP Prime (not ASCII errors)
 _PPL_UNICODE_OPS: frozenset = frozenset([
@@ -201,7 +88,7 @@ _PPL_UNICODE_OPS: frozenset = frozenset([
 # Reserved global variables (system variables that shouldn't be shadowed)
 _RESERVED_GLOBALS: frozenset = frozenset([
     'X', 'Y', 'Z',
-    'THETA', 'ANS', 'VAR', 'EXACT', 'WINDOW',
+    'THETA', 'ANS', 'VAR', 'EXACT', 'WINDOW', 'MYLANGS',
     'G0', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'G8', 'G9',
     'L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'L8', 'L9',
     'M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9',
@@ -229,6 +116,22 @@ def _color_enabled():
     return True
 
 _HAS_COLOR = _color_enabled()
+_IDENT = r'[^\W\d]\w*'
+
+
+def _header_needs_continuation(erased_stmt: str) -> bool:
+    stmt = erased_stmt.strip().upper()
+    if not stmt:
+        return False
+    if re.match(r'^IF(?:\s+.*)?$', stmt) and 'THEN' not in stmt:
+        return True
+    if re.match(r'^ELSE\s+IF(?:\s+.*)?$', stmt) and 'THEN' not in stmt:
+        return True
+    if re.match(r'^WHILE(?:\s+.*)?$', stmt) and 'DO' not in stmt:
+        return True
+    if re.match(r'^FOR\s+.+$', stmt) and ' DO' not in f' {stmt}':
+        return True
+    return False
 
 _CLR_RED = '\033[91m' if _HAS_COLOR else ''
 _CLR_GRN = '\033[92m' if _HAS_COLOR else ''
@@ -404,6 +307,69 @@ def _count_args(args_str: str) -> int:
     return commas + 1
 
 
+def _find_top_level_assignment_ops(text: str) -> List[int]:
+    """Return indices of := operators that occur outside nested brackets."""
+    safe = _erase_strings(text)
+    depth = 0
+    hits: List[int] = []
+    i = 0
+    while i < len(safe) - 1:
+        ch = safe[i]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth = max(0, depth - 1)
+        elif ch == ':' and safe[i + 1] == '=' and depth == 0:
+            hits.append(i)
+            i += 1
+        i += 1
+    return hits
+
+
+def _is_pragma_directive(stmt: str) -> bool:
+    return bool(re.match(r'^\s*#pragma\b', stmt, re.IGNORECASE))
+
+
+def _is_forward_declaration(stmt: str, defined_fns: Set[str]) -> bool:
+    if not stmt.rstrip().endswith(";"):
+        return False
+    match = re.match(r'^\s*([A-Za-z_]\w*)\s*\((.*?)\)\s*;?\s*$', stmt)
+    if not match:
+        return False
+    name = match.group(1).upper()
+    return name in defined_fns
+
+
+def _find_square_bracket_indexing(stmt: str) -> List[str]:
+    safe = _erase_strings(stmt)
+    hits: List[str] = []
+    for match in re.finditer(rf'\b({_IDENT})\s*\[', safe):
+        hits.append(match.group(1))
+    return hits
+
+
+def _match_key_header(stmt: str):
+    return re.match(r'^KEY\s+(\w+)\s*\((.*?)\)\s*;?$', stmt, re.IGNORECASE)
+
+
+def _match_local_function_header(stmt: str):
+    return re.match(r'^LOCAL\s+(\w+)\s*\((.*?)\)\s*(?=BEGIN\b|;?$)', stmt, re.IGNORECASE)
+
+
+def _begin_follows(proc_lines: List[str], start_idx: int, max_ahead: int = 12) -> bool:
+    """Return True when the next meaningful code line within the lookahead is BEGIN."""
+    blockers = r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE|END|THEN|ELSE|DEFAULT)\b'
+    for j in range(start_idx, min(start_idx + max_ahead, len(proc_lines))):
+        nxt = _strip_comment(proc_lines[j]).strip()
+        if not nxt:
+            continue
+        if re.match(r'^BEGIN;?$', nxt, re.IGNORECASE):
+            return True
+        if re.match(blockers, nxt, re.IGNORECASE):
+            return False
+    return False
+
+
 # ── Main linter ───────────────────────────────────────────────────────────────
 
 def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
@@ -434,34 +400,25 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         line = _strip_comment(raw).strip()
 
         # Function declaration (handle bare declarations without EXPORT/PROCEDURE)
-        m = re.match(r'(?:EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)', line, re.IGNORECASE)
+        m = re.match(r'(?:EXPORT|PROCEDURE)\s+(\w+)(?:\s*\((.*?)\))?', line, re.IGNORECASE)
+        if not m:
+            m = _match_key_header(line)
         # Check for bare function: Name(...) BEGIN
         if not m:
             m_bare = re.match(r'^(\w+)\s*\((.*?)\)\s*$', line)
             if m_bare:
-                # To be sure, peek ahead for BEGIN
-                is_proc = False
-                for j in range(i, min(i + 5, len(proc_lines))):
-                    next_line = _strip_comment(proc_lines[j]).strip()
-                    if not next_line: continue
-                    if re.match(r'^BEGIN;?$', next_line, re.IGNORECASE):
-                        is_proc = True
-                        break
-                    if re.match(r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE)\b', next_line, re.IGNORECASE):
-                        break
-                if is_proc: m = m_bare
+                if _begin_follows(proc_lines, i):
+                    m = m_bare
         # LOCAL function definition: LOCAL name(params) BEGIN...END
         if not m:
-            m_lfn = re.match(r'^LOCAL\s+(\w+)\s*\((.*?)\)\s*;?$', line, re.IGNORECASE)
+            m_lfn = _match_local_function_header(line)
             if m_lfn:
-                is_proc = False
-                for j in range(i, min(i + 5, len(proc_lines))):
-                    nxt2 = _strip_comment(proc_lines[j]).strip()
-                    if not nxt2: continue
-                    if re.match(r'^BEGIN;?$', nxt2, re.IGNORECASE): is_proc = True
-                    break
-                if is_proc: m = m_lfn
+                if 'BEGIN' in line.upper() or _begin_follows(proc_lines, i):
+                    m = m_lfn
         
+        if m and m.group(2) is None and line.rstrip().endswith(';'):
+            m = None
+
         if m:
             params_group = 2 if 'EXPORT' in m.group(0).upper() or 'PROCEDURE' in m.group(0).upper() else 2
             # Wait, for m_bare: r'^(\w+)\s*\((.*?)\)\s*;?$', group 1 is name, group 2 is params.
@@ -471,21 +428,22 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             name_up = fname.upper()
             curr_pass1_fn = name_up
             
-            if name_up in BUILTINS or name_up in _STRUCTURAL:
+            if name_up in _CRITICAL_SHADOW_BUILTINS or name_up in _STRUCTURAL:
                 issues.append(Issue(i, 'ERROR', f"Cannot redefine built-in function or keyword '{fname}'", line))
 
             if name_up in defined_fns:
                 duplicate_fns.add(name_up)
             defined_fns.add(name_up)
-            defined_fn_args[name_up] = _count_args(m.group(2))
+            params_text = m.group(2) or ''
+            defined_fn_args[name_up] = _count_args(params_text)
             
             # Extract parameters
             params: Set[str] = set()
-            for p in m.group(2).split(','):
+            for p in params_text.split(','):
                 p = p.strip()
                 if p:
                     p_up = p.upper()
-                    if p_up in BUILTINS or p_up in _STRUCTURAL:
+                    if p_up in _CRITICAL_SHADOW_BUILTINS or p_up in _STRUCTURAL:
                         issues.append(Issue(i, 'ERROR', f"Cannot use built-in function or keyword '{p}' as a parameter name", line))
                     params.add(p_up)
             fn_params[name_up] = params
@@ -523,7 +481,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     fn_locals.setdefault(str(curr_pass1_fn), set()).add(vup)
 
     # Names that are safe to call without a warning
-    known_callables = BUILTINS | defined_fns | assigned_vars | local_vars
+    known_callables = BUILTINS | defined_fns | assigned_vars | local_vars | _RESERVED_GLOBALS
 
     # ── Pass 1b: detect 4+ consecutive list literal assignments (HP Prime G1 bug) ─
     consecutive_list_assigns = 0
@@ -649,7 +607,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         if not has_stmt_end and (paren_balance > 0 or brace_balance > 0
                                  or combined_stmt.endswith(',')
                                  or combined_stmt.endswith(':=')
-                                 or trailing_op):
+                                 or trailing_op
+                                 or _header_needs_continuation(erased_stmt)):
             continue
         # Report bracket imbalances detected on an already-terminated statement.
         if paren_balance > 0:
@@ -730,6 +689,13 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             bare_clean = clean.rstrip(';').strip()
             
             display = proc_lines[curr_ln - 1]
+            is_pragma_directive = _is_pragma_directive(bare_clean)
+            is_forward_declaration = (
+                current_fn is None and _is_forward_declaration(clean, defined_fns)
+            )
+
+            if is_pragma_directive:
+                continue
 
             # ── Missing semicolon ──────────────────────────────────────────────────────────────
             _SEMI_EXEMPT_KW = frozenset([
@@ -746,8 +712,15 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     and bool(re.match(r'^LOCAL\s+\w+\s*\(', bare_clean, re.IGNORECASE))
                     and ':=' not in bare_clean
                 )
-                if _fw not in _SEMI_EXEMPT_KW and not _is_local_fn_hdr:
-                    err(curr_ln, "Missing semicolon at end of statement.", display)
+                _is_bare_fn_hdr = False
+                if _fw not in _SEMI_EXEMPT_KW and re.match(r'^\w+\s*\((.*?)\)\s*$', bare_clean):
+                    _is_bare_fn_hdr = _begin_follows(proc_lines, curr_ln)
+                if (
+                    _fw not in _SEMI_EXEMPT_KW
+                    and not _is_local_fn_hdr
+                    and not _is_bare_fn_hdr
+                ):
+                    warn(curr_ln, "Missing semicolon at end of statement.", display)
 
             # ── Unreachable code check ────────────────────────────────────────────────────
             if unreachable_flag:
@@ -774,18 +747,21 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
 
             # ── Malformed Hex/Bin Literals ──────────────────────────────────────────────
             # Valid forms:
-            #   #AFh  / #1010b   — explicit suffix
-            #   #RRGGBB          — exactly 6 hex digits (PPL color constant, no suffix)
-            # Invalid: #AF  (not 6 digits, no suffix)
+            #   #AFh / #1010b     — explicit suffix
+            #   #AF / #0 / #FF    — short Prime-style unsuffixed hex
+            #   #RRGGBB           — 6-digit colour constant
+            #   #AF:16h           — explicit base literal
             _BAD_HEX = re.compile(
                 r'#(?!'                # start of # token that is NOT one of:
+                r'[0-9A-Za-z]+:[0-9]+[hH]?\b'  # explicit base literal
+                r'|'
                 r'[0-9A-Fa-f]+[hbHB]\b'   # has h/b suffix
-                r'|[0-9A-Fa-f]{6}\b'       # exactly 6-digit colour (#RRGGBB)
-                r')[0-9A-Fa-f]+\b',
+                r'|[0-9A-Fa-f]{1,6}\b'     # Prime hex / colour constants
+                r')[0-9A-Za-z:]+\b',
                 re.IGNORECASE
             )
             if _BAD_HEX.search(safe):
-                err(curr_ln, "Malformed Hex/Bin literal — expected 'h' or 'b' suffix, or a 6-digit colour constant (e.g., #AFh, #10b, #FF0000).", display)
+                err(curr_ln, "Malformed Hex/Bin literal — expected a valid Prime-style literal such as #AF, #AFh, #10b, #FF0000, or #AF:16h.", display)
 
             # ── String Interpretation Check (Invalid Escapes) ───────────────────────────
             # Only if the original line has quotes
@@ -816,15 +792,16 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     _warned_zero_index.add(vname)
                     warn(curr_ln, "HP Prime arrays and lists are 1-indexed. Indexing with 0 will cause a runtime error.", display)
                     break
-            # '=' used instead of ':=' or '=='
-            if not re.match(r'^FOR\b', safe, re.IGNORECASE):
-                # We skip if it's likely a comment or already handled
-                if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)', safe):
-                    err(curr_ln, 'Use ":=" for assignment, or "==" for equality. A single "=" is invalid.', display)
-
             # Trailing operators
-            if re.search(r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV))\s*;?\s*$', safe, re.IGNORECASE):
+            if re.search(r'(?:[-+*/^]|\b(?:AND|OR|XOR|MOD|DIV)\b)\s*;?\s*$', safe):
                 err(curr_ln, 'Expression ends with a trailing operator', display)
+
+            # Division by zero
+            if re.search(r'(?:/|\bDIV\b|\bMOD\b)\s*0+(?:\.0+)?(?!\d|\.|[eE])', safe):
+                err(curr_ln, 'Division by zero literal detected.', display)
+
+            if is_forward_declaration:
+                continue
 
             # ── UNREACHABLE CHECK ─────────────────────────────────────────────
 
@@ -839,20 +816,21 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 found_kw = False
                 
                 # ── Function declaration ───────────────────
-                m_fn = re.match(r'^(?:EXPORT|PROCEDURE)\s+(\w+)\s*\((.*?)\)', remaining, re.IGNORECASE)
+                m_fn = re.match(r'^(?:EXPORT|PROCEDURE)\s+(\w+)(?:\s*\((.*?)\))?', remaining, re.IGNORECASE)
+                if not m_fn:
+                    m_fn = _match_key_header(remaining)
+                if not m_fn:
+                    m_lfn_inline = _match_local_function_header(remaining)
+                    if m_lfn_inline and ('BEGIN' in remaining.upper() or _begin_follows(proc_lines, int(curr_ln))):
+                        m_fn = m_lfn_inline
                 if not m_fn:
                     m_bare = re.match(r'^(\w+)\s*\((.*?)\)', remaining)
                     if m_bare:
-                        is_proc = False
-                        cur_idx = int(curr_ln)
-                        for k in range(cur_idx, min(cur_idx + 5, len(proc_lines))):
-                            nxt = _strip_comment(proc_lines[k]).strip()
-                            if not nxt: continue
-                            if re.match(r'^BEGIN;?$', nxt, re.IGNORECASE):
-                                is_proc = True; break
-                            if re.match(r'^(EXPORT|PROCEDURE|LOCAL|VAR|IF|FOR|WHILE|REPEAT|CASE|END)\b', nxt, re.IGNORECASE):
-                                break
-                        if is_proc: m_fn = m_bare
+                        if _begin_follows(proc_lines, int(curr_ln)):
+                            m_fn = m_bare
+
+                if m_fn and m_fn.group(2) is None and clean.rstrip().endswith(';'):
+                    m_fn = None
 
                 if m_fn:
                     fname = m_fn.group(1)
@@ -864,7 +842,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     used_locals_in_fn = set() 
                     declared_in_fn_pass2 = set()
                     assigned_vars_in_fn = set()
-                    for p in m_fn.group(2).split(','):
+                    for p in (m_fn.group(2) or '').split(','):
                         p = p.strip().upper()
                         if p: assigned_vars_in_fn.add(p)
                     active_for_counters = []
@@ -885,8 +863,25 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     remaining = remaining[m_begin.end():].strip()
                     found_kw = True
 
+                # ── IFERR ───────────────────
+                elif (m_iferr := re.match(r'^IFERR\b', remaining, re.IGNORECASE)):
+                    block_stack.append(('IFERR', curr_ln))
+                    remaining = remaining[m_iferr.end():].strip()
+                    found_kw = True
+
+                # ── THEN (IFERR separator) ───────────────────
+                elif (m_then := re.match(r'^THEN\b', remaining, re.IGNORECASE)):
+                    remaining = remaining[m_then.end():].strip()
+                    found_kw = True
+
                 # ── FOR (strict) ───────────────────
-                elif (m_for := re.match(r'^FOR\s+([A-Za-z_]\w*)\s+FROM\s+.+?\s+(?:DOWN)?TO\s+.+?(?:\s+STEP\s+.+?)?\s+DO\b', remaining, re.IGNORECASE)):
+                elif (
+                    m_for := re.match(
+                        rf'^FOR\s+({_IDENT})(?:\s+FROM\s+.+?\s+(?:DOWN)?TO\s+.+?(?:\s+STEP\s+.+?)?|\s*:=\s*.+?\s+(?:DOWN)?TO\s+.+?(?:\s+STEP\s+.+?)?)\s+DO\b',
+                        remaining,
+                        re.IGNORECASE,
+                    )
+                ):
                     block_stack.append(('FOR', curr_ln))
                     if len(block_stack) > 4 and len(block_stack) not in _depth_warned:
                         _depth_warned.add(len(block_stack))
@@ -915,8 +910,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         warn(curr_ln, f"Deeply nested block (depth {len(block_stack)}). Consider refactoring.", display)
                     loop_depth += 1
                     cond = m_while.group(1)
-                    if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
-                         warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                    if ':=' in cond and not cond.lstrip().startswith('('):
+                        warn(curr_ln, "Possible assignment inside condition. Use '=' for equality comparison.", display)
                     executable_statement_seen = False
                     remaining = remaining[m_while.end():].strip()
                     found_kw = True
@@ -957,8 +952,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         _depth_warned.add(len(block_stack))
                         warn(curr_ln, f"Deeply nested block (depth {len(block_stack)}). Consider refactoring.", display)
                     cond = m_if.group(1)
-                    if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
-                         warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                    if ':=' in cond and not cond.lstrip().startswith('('):
+                        warn(curr_ln, "Possible assignment inside condition. Use '=' for equality comparison.", display)
                     executable_statement_seen = False
                     remaining = remaining[m_if.end():].strip()
                     found_kw = True
@@ -977,8 +972,8 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         # ELSE IF introduces a new nested IF block needing its own END
                         block_stack.append(('IF', curr_ln))
                         cond = m_elseif.group(1)
-                        if re.search(r'(?<![:<>!=])\b([A-Za-z_]\w*)\s*=(?!=)|:=', cond):
-                             warn(curr_ln, "Possible assignment inside condition. Use '==' for equality comparison.", display)
+                        if ':=' in cond and not cond.lstrip().startswith('('):
+                            warn(curr_ln, "Possible assignment inside condition. Use '=' for equality comparison.", display)
                         remaining = remaining[m_elseif.end():].strip()
                     else:
                         if not any(kw == 'IF' for kw, ln in block_stack) and not case_default_stack:
@@ -1079,7 +1074,18 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     # Distinguish LOCAL function def from LOCAL variable declaration.
                     # LOCAL name(params) with no ':' before '(' is a function def.
                     _lfn = re.match(r'^LOCAL\s+(\w+)\s*\(([^)]*)\)\s*;?$', remaining, re.IGNORECASE)
-                    _is_fn_def = bool(_lfn) and ':' not in remaining.split('(')[0]
+                    _is_fn_def = False
+                    if _lfn and ':' not in remaining.split('(')[0]:
+                        _next_begin = False
+                        for k in range(int(curr_ln), min(int(curr_ln) + 5, len(proc_lines))):
+                            nxt = _strip_comment(proc_lines[k]).strip()
+                            if not nxt:
+                                continue
+                            if re.match(r'^BEGIN;?$', nxt, re.IGNORECASE):
+                                _next_begin = True
+                            break
+                        _is_fn_def = _next_begin
+                    _is_forward_local_fn = bool(_lfn) and not _is_fn_def and current_fn is None
                     if _is_fn_def:
                         # LOCAL function: open a new function scope
                         fname = _lfn.group(1)
@@ -1101,10 +1107,13 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         unreachable_ln    = -1
                         remaining = remaining[_lfn.end():].strip()
                         found_kw = True
+                    elif _is_forward_local_fn:
+                        remaining = remaining[_lfn.end():].strip()
+                        found_kw = True
                     else:
                         # LOCAL variable declaration
                         m_local = re.match(r'^LOCAL\s+(.+?)\b', remaining, re.IGNORECASE)
-                        if not current_fn: err(curr_ln, 'LOCAL declaration outside of any function', display)
+                        is_global_decl = current_fn is None
                         if m_local:
                             lstr = m_local.group(1)
                             if '[' in lstr or ']' in lstr:
@@ -1127,18 +1136,12 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                                     if v in declared_in_fn_pass2 and v not in _warned_shadows:
                                         warn(curr_ln, f'Duplicate declaration of LOCAL variable "{mv.group(1)}" in the same scope.', display)
                                     declared_in_fn_pass2.add(v)
-                                if ':=' in l_str: assigned_vars_in_fn.add(v)
+                                if ':=' in l_str and current_fn:
+                                    assigned_vars_in_fn.add(v)
                             remaining = remaining[m_local.end():].strip()
                             found_kw = True
 
                 if not found_kw:
-                    # Top-level built-in calls are forbidden outside a function body.
-                    # Forward declarations (calls to user-defined functions) are allowed.
-                    if current_fn is None and remaining.strip():
-                        m_top_call = re.match(r'^([A-Za-z_]\w*)\s*\(', remaining)
-                        if m_top_call and m_top_call.group(1).upper() in BUILTIN_ARGS:
-                            err(curr_ln, 'Executable code is strictly forbidden outside a function body.', display)
-                            break  # one error per top-level statement is enough
                     # Skip past non-keyword expression content to find next structural keyword.
                     # Guard: don't scan past THEN/ELSE/DO/UNTIL (they indicate a special context
                     # like IFERR...THEN where forward scanning would misalign the block stack).
@@ -1146,7 +1149,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     starts_with_ctx_kw = any(rem_up.startswith(k) for k in ('THEN', 'ELSE', 'DO', 'UNTIL'))
                     if not starts_with_ctx_kw:
                         safe_rem = _erase_strings(remaining)
-                        m_next_kw = re.search(r'(END|ELSE|UNTIL)', safe_rem, re.IGNORECASE)
+                        m_next_kw = re.search(r'\b(END|ELSE|UNTIL)\b', safe_rem, re.IGNORECASE)
                         if m_next_kw:
                             remaining = remaining[m_next_kw.start():]
                             continue  # re-enter while loop to process the found keyword
@@ -1155,9 +1158,20 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             # ── Assignments ───────────────────────────────────────────────────
             # Match assignments. Note: we search for := and take EVERYTHING to its left 
             # as the target, THEN validate. This allows us to catch invalid L-values.
-            for match in re.finditer(r'(.+?)\s*:=', safe):
-                target = match.group(1).strip()
-                
+            assignment_positions: List[int] = []
+            if not re.match(r'^LOCAL\b', bare_clean, re.IGNORECASE):
+                assignment_positions = _find_top_level_assignment_ops(safe)
+
+            for bracket_target in _find_square_bracket_indexing(display):
+                warn(
+                    curr_ln,
+                    f"Square-bracket indexing '{bracket_target}[...]' is emulator-compatible, but HP Prime hardware expects parentheses like '{bracket_target}(...)'. This may cause 'Invalid input' on-device.",
+                    display,
+                )
+
+            for pos in assignment_positions:
+                target = safe[:pos].strip()
+
                 # Precise target extraction: walk backwards from the end of the match
                 # until we find a space that is NOT inside parentheses.
                 if ' ' in target or ';' in target:
@@ -1166,19 +1180,21 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     found_start = 0
                     while i >= 0:
                         ch = target[i]
-                        if ch in ')]}': depth += 1
-                        elif ch in '([{': depth -= 1
+                        if ch in ')]}':
+                            depth += 1
+                        elif ch in '([{':
+                            depth -= 1
                         elif (ch == ' ' or ch == ';') and depth == 0:
                             found_start = i + 1
                             break
                         i -= 1
                     target = target[found_start:].strip()
-                
+
                 if target:
                     _is_valid_lhs(target, curr_ln, issues, display)
                     
                     # Track assignment to avoid "used before assigned"
-                    var_match = re.match(r'^([A-Za-z_]\w*)', target)
+                    var_match = re.match(rf'^({_IDENT})', target)
                     if var_match and current_fn:
                         assigned_vars_in_fn.add(var_match.group(1).upper())
 
@@ -1220,14 +1236,24 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                              pass
 
             # ── Color Literal Validation ──────────────────────────────────────
-            # Flag #RRGGBB color literals as Syntax Errors for hardware compatibility
+            # The emulator accepts #RRGGBB directly, but hardware guidance lives
+            # in hardware_validator.py, so keep this as a warning here.
             for m_hex in re.finditer(r'#([0-9A-Fa-f]{1,6})\b', safe):
-                err(curr_ln, f"Error: Invalid color literal '{m_hex.group(0)}'. Use '0x' prefix for Hex.", display)
+                warn(
+                    curr_ln,
+                    f"Color literal '{m_hex.group(0)}' is emulator-compatible; use '0x{m_hex.group(1).upper()}' for stricter hardware compatibility.",
+                    display,
+                )
 
             # ── Specific Function Call Analysis ───────────────────────────────
             for m_call in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', safe):
                 fg = m_call.group(1)
                 func_name = fg.upper()
+                attr_owner = None
+                if m_call.start() > 0 and safe[m_call.start() - 1] == '.':
+                    owner_match = re.search(r'([A-Za-z_]\w*)\.\s*$', safe[:m_call.start()])
+                    if owner_match:
+                        attr_owner = owner_match.group(1).upper()
                 
                 # Extract argument string (handling nested parens)
                 start_idx = m_call.end()
@@ -1247,8 +1273,14 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 count = _count_args(args_str)
 
                 # Lowercase PPL keyword used instead of uppercase
-                if fg != func_name and func_name in BUILTIN_ARGS:
-                    err(curr_ln, f"PPL keywords must be UPPERCASE. Use '{func_name}' instead of '{fg}'.", display)
+                if fg != func_name and func_name in BUILTIN_ARGS and attr_owner is None:
+                    warn(curr_ln, f"PPL built-ins are typically uppercase. Use '{func_name}' instead of '{fg}' for calculator-style formatting.", display)
+                    continue
+
+                # Treat dotted calls as object/CAS methods rather than free-standing
+                # PPL builtins, except for CAS.<command> which shares the same arity
+                # rules as its top-level symbolic counterpart.
+                if attr_owner is not None and attr_owner != 'CAS':
                     continue
 
                 # Hard-reject: commands with specific corrective guidance
@@ -1259,8 +1291,9 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 # Built-in check
                 if func_name in BUILTIN_ARGS:
                     min_args, max_args = BUILTIN_ARGS[func_name]
-                    if count < min_args or count > max_args:
-                        err(curr_ln, f'"{fg}" expects {min_args}-{max_args} arguments, got {count}', display)
+                    if not command_accepts_arity(func_name, count):
+                        expected = command_expected_arity(func_name)
+                        err(curr_ln, f'"{fg}" expects {expected} arguments, got {count}', display)
                     
                     # Specific Checks: WAIT
                     if func_name == 'WAIT' and count == 1:
@@ -1316,6 +1349,20 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                              err(curr_ln, f"Error: Unknown function '{fg}'. Did you mean '{fg}_P'?", display)
                         else:
                              warn(curr_ln, f"Call to unknown function '{fg}'", display)
+
+    if stmt_buf:
+        tail_stmt = " ".join(stmt_buf).strip()
+        tail_ln = stmt_start_ln if stmt_start_ln > 0 else len(proc_lines)
+        tail_display = proc_lines[tail_ln - 1] if 0 < tail_ln <= len(proc_lines) else tail_stmt
+        tail_upper = _erase_strings(tail_stmt).strip().upper()
+        if tail_upper.startswith('IF') and 'THEN' not in tail_upper:
+            err(tail_ln, "Malformed IF statement — expected 'IF condition THEN'.", tail_display)
+        elif tail_upper.startswith('ELSE IF') and 'THEN' not in tail_upper:
+            err(tail_ln, "Malformed ELSE IF statement — expected 'ELSE IF condition THEN'.", tail_display)
+        elif tail_upper.startswith('WHILE') and 'DO' not in tail_upper:
+            err(tail_ln, "Malformed WHILE loop — expected 'WHILE condition DO'.", tail_display)
+        elif tail_upper.startswith('FOR') and ' DO' not in f' {tail_upper}':
+            err(tail_ln, "Malformed FOR loop — expected 'FOR var FROM start TO end DO'. (Hint: Use 'DO' to open the loop block, not 'BEGIN')", tail_display)
 
     # ── End-of-file: unclosed block checks ───────────────────────────────────
     if block_stack:

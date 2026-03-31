@@ -143,6 +143,12 @@ class CAS:
         return self.series(*args, **kwargs)
 
     def __getattr__(self, name):
+        lower_name = name.lower()
+        if lower_name != name:
+            try:
+                return object.__getattribute__(self, lower_name)
+            except AttributeError:
+                pass
         def stub(*args, **kwargs):
             return f"CAS.{name}: not implemented"
         return stub
