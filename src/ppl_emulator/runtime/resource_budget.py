@@ -62,7 +62,7 @@ class ResourceBudget:
         max_call_depth: int = 128,
         max_block_depth: int = 128,
         max_line_events: int = 1_000_000,
-        max_elapsed_seconds: float = 8.0,
+        max_elapsed_seconds: float | None = 8.0,
     ):
         self.max_total_bytes = max_total_bytes
         self.max_single_object_bytes = max_single_object_bytes
@@ -137,7 +137,7 @@ class ResourceBudget:
                     limit=self.max_line_events,
                 )
             elapsed = time.monotonic() - self._start_monotonic
-            if elapsed > self.max_elapsed_seconds:
+            if self.max_elapsed_seconds is not None and elapsed > self.max_elapsed_seconds:
                 self._raise(
                     "time",
                     (

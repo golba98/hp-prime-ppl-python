@@ -284,6 +284,7 @@ class HPPrimeRuntime:
     _DEFAULT_LINE_EVENTS: int = 1_000_000
     _DEFAULT_ELAPSED_SECONDS: float = 8.0
     _pending_elapsed_seconds: float | None = None
+    _pending_elapsed_seconds_set: bool = False
 
     @staticmethod
     def _stream_is_tty(stream) -> bool:
@@ -311,8 +312,10 @@ class HPPrimeRuntime:
         self.width  = 320
         self.height = 240
         elapsed_seconds = HPPrimeRuntime._pending_elapsed_seconds
+        elapsed_seconds_set = HPPrimeRuntime._pending_elapsed_seconds_set
         HPPrimeRuntime._pending_elapsed_seconds = None
-        if elapsed_seconds is None:
+        HPPrimeRuntime._pending_elapsed_seconds_set = False
+        if not elapsed_seconds_set:
             elapsed_seconds = HPPrimeRuntime._DEFAULT_ELAPSED_SECONDS
         # Track whether any graphics call has mutated the framebuffer.
         self.screen_is_dirty = False
