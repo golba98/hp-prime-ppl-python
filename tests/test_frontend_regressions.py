@@ -8,7 +8,7 @@ import pytest
 from src.ppl_emulator.linter import lint
 
 
-def _run_cli(code: str) -> subprocess.CompletedProcess[str]:
+def _run_cli(code: str, extra_args: list[str] | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     out_png = os.path.join(tempfile.gettempdir(), "_ppl_frontend_regression.png")
     return subprocess.run(
         [
@@ -20,10 +20,12 @@ def _run_cli(code: str) -> subprocess.CompletedProcess[str]:
             "--dump-python",
             "--output",
             out_png,
+            *(extra_args or []),
         ],
         text=True,
         capture_output=True,
         check=False,
+        timeout=timeout,
     )
 
 
@@ -119,6 +121,21 @@ END;
     assert [i for i in issues if i.severity == "ERROR"] == []
     cli = _run_cli(code)
     assert cli.returncode == 0
+
+
+def test_cli_can_override_runtime_time_budget():
+    code = """
+EXPORT T()
+BEGIN
+  WHILE 1 DO
+  END;
+END;
+"""
+    cli = _run_cli(code, extra_args=["--max-elapsed-seconds", "0.01"], timeout=30)
+    assert cli.returncode != 0
+    combined_output = f"{cli.stdout}\n{cli.stderr}"
+    assert "RESOURCE LIMIT EXCEEDED" in combined_output.upper()
+    assert "(TIME)" in combined_output.upper()
 
 
 def test_direct_recursion_emits_warning():

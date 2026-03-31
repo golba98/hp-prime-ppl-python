@@ -323,6 +323,7 @@ Examples:
   ppl BSTVisualizer.hpprgm --output bst_screen.png
   ppl --code "EXPORT T() BEGIN PRINT(1+1); END;"
   ppl BSTVisualizer.hpprgm --dump-python
+  ppl Menu.hpprgm --max-elapsed-seconds 20
         """
     )
     parser.add_argument('file',            nargs='?',            help='PPL source file (.hpprgm or .txt)')
@@ -334,6 +335,8 @@ Examples:
     parser.add_argument('--warnings-only', action='store_true',  help='Show warnings but do not fail on them')
     parser.add_argument('--input',         action='append',      help='Provide a value for INPUT() calls in headless mode (can be used multiple times)')
     parser.add_argument('--args',          default='',           help='Comma-separated arguments for the EXPORT function (e.g. --args "50" or --args "50,100")')
+    parser.add_argument('--max-elapsed-seconds', type=float, default=None,
+                        help='Override the emulator runtime time budget for this run')
     parser.add_argument('--print-mode',   default='both',       choices=['screen', 'terminal', 'both'],
                         help='Where PRINT() output appears: '
                              '"screen" = HP Prime display only (Option A), '
@@ -354,6 +357,8 @@ Examples:
     # ── Set PRINT output routing ──────────────────────────────────
     from src.ppl_emulator.runtime.engine import HPPrimeRuntime
     HPPrimeRuntime._print_mode = getattr(args, 'print_mode', 'both')
+    if args.max_elapsed_seconds is not None:
+        HPPrimeRuntime._pending_elapsed_seconds = args.max_elapsed_seconds
 
     # ── Read source ──────────────────────────────────────────────
     filename = args.file or '<inline>'

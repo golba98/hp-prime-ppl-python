@@ -283,6 +283,7 @@ class HPPrimeRuntime:
     _DEFAULT_BLOCK_DEPTH: int = 128
     _DEFAULT_LINE_EVENTS: int = 1_000_000
     _DEFAULT_ELAPSED_SECONDS: float = 8.0
+    _pending_elapsed_seconds: float | None = None
 
     @staticmethod
     def _stream_is_tty(stream) -> bool:
@@ -309,6 +310,10 @@ class HPPrimeRuntime:
     def __init__(self, compiled_mode=None):
         self.width  = 320
         self.height = 240
+        elapsed_seconds = HPPrimeRuntime._pending_elapsed_seconds
+        HPPrimeRuntime._pending_elapsed_seconds = None
+        if elapsed_seconds is None:
+            elapsed_seconds = HPPrimeRuntime._DEFAULT_ELAPSED_SECONDS
         # Track whether any graphics call has mutated the framebuffer.
         self.screen_is_dirty = False
         # Track last saved output path (if any).
@@ -356,7 +361,7 @@ class HPPrimeRuntime:
             max_call_depth=HPPrimeRuntime._DEFAULT_CALL_DEPTH,
             max_block_depth=HPPrimeRuntime._DEFAULT_BLOCK_DEPTH,
             max_line_events=HPPrimeRuntime._DEFAULT_LINE_EVENTS,
-            max_elapsed_seconds=HPPrimeRuntime._DEFAULT_ELAPSED_SECONDS,
+            max_elapsed_seconds=elapsed_seconds,
         )
         self.CAS    = CAS(self)
         self.Finance = _FinanceMock()
