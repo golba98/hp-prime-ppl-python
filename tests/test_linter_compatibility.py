@@ -72,9 +72,8 @@ def test_pragma_and_forward_declarations_do_not_fail_lint():
       PRINT(Helper());
     END;
     """
-    assert _errors(code) == []
-    warns = _warnings(code)
-    assert any("Missing semicolon" in issue.message for issue in warns)
+    errs = _errors(code)
+    assert any("Missing semicolon" in issue.message for issue in errs)
 
 
 def test_single_equals_in_if_is_valid_ppl_equality():

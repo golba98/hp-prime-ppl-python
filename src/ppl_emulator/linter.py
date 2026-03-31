@@ -150,6 +150,10 @@ class Issue:
     severity: str        # 'ERROR' or 'WARNING'
     message:  str
     text:     str = ''   # original source line (stripped)
+    filename: str = '<unknown>'
+    column: int = 0
+    hint: str = ''
+    category: str = ''
 
     def __str__(self):
         is_err = (self.severity == 'ERROR')
@@ -157,8 +161,12 @@ class Issue:
         color  = _CLR_RED if is_err else _CLR_YEL
         
         prefix = f'  {color}{_CLR_BLD}[{tag}]{_CLR_RST}  '
-        loc    = f'{_CLR_GRY}line {self.line_no:>4}{_CLR_RST}'
-        return f'{prefix} [{loc}]  {_CLR_BLD}{self.message}{_CLR_RST}'
+        if self.column > 0:
+            loc = f'{_CLR_GRY}line {self.line_no:>4}:{self.column}{_CLR_RST}'
+        else:
+            loc = f'{_CLR_GRY}line {self.line_no:>4}{_CLR_RST}'
+        hint = f"  Hint: {self.hint}" if self.hint else ""
+        return f'{prefix} [{loc}]  {_CLR_BLD}{self.message}{_CLR_RST}{hint}'
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -228,6 +236,39 @@ def _has_odd_quotes(line: str) -> bool:
             i += 1 # skip escaped quote \"
         i += 1
     return in_str
+
+
+def _find_first_single_quote(line: str) -> int:
+    """Return 1-based column of first single quote outside double-quoted strings."""
+    in_str = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"':
+            if in_str:
+                if i + 1 < len(line) and line[i + 1] == '"':
+                    i += 1
+                else:
+                    in_str = False
+            else:
+                in_str = True
+        elif in_str and ch == '\\' and i + 1 < len(line) and line[i + 1] == '"':
+            i += 1
+        elif not in_str and ch == "'":
+            return i + 1
+        i += 1
+    return 0
+
+
+def _identifier_token_after_keyword(stmt: str, keyword: str) -> tuple[str, int]:
+    """
+    Return (token, 1-based col) immediately after a leading keyword.
+    Returns ("", 0) if no token is found.
+    """
+    m = re.match(rf'^\s*{keyword}\b\s+([^\s(;,]+)', stmt, re.IGNORECASE)
+    if not m:
+        return '', 0
+    return m.group(1), m.start(1) + 1
 
 
 def _paren_balance(line: str) -> int:
@@ -349,11 +390,11 @@ def _find_square_bracket_indexing(stmt: str) -> List[str]:
 
 
 def _match_key_header(stmt: str):
-    return re.match(r'^KEY\s+(\w+)\s*\((.*?)\)\s*;?$', stmt, re.IGNORECASE)
+    return re.match(rf'^KEY\s+({_IDENT})\s*\((.*?)\)\s*;?$', stmt, re.IGNORECASE)
 
 
 def _match_local_function_header(stmt: str):
-    return re.match(r'^LOCAL\s+(\w+)\s*\((.*?)\)\s*(?=BEGIN\b|;?$)', stmt, re.IGNORECASE)
+    return re.match(rf'^LOCAL\s+({_IDENT})\s*\((.*?)\)\s*(?=BEGIN\b|;?$)', stmt, re.IGNORECASE)
 
 
 def _begin_follows(proc_lines: List[str], start_idx: int, max_ahead: int = 12) -> bool:
@@ -383,6 +424,73 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     raw_lines: List[str] = ppl_code.replace('\r\n', '\n').replace('\r', '\n').splitlines()
     proc_lines  = raw_lines
 
+    # ── Strict lexical/header checks before deeper analysis ───────────────────
+    for i, raw in enumerate(raw_lines, 1):
+        line = _strip_comment(raw)
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # HP Prime PPL strings use only double quotes.
+        single_quote_col = _find_first_single_quote(line)
+        if single_quote_col:
+            issues.append(Issue(
+                i,
+                'ERROR',
+                "Invalid string literal delimiter. Use double quotes.",
+                stripped,
+                filename=filename,
+                column=single_quote_col,
+                category='LEXER',
+            ))
+
+        # Strict EXPORT header grammar: EXPORT Name() [no trailing ';' before BEGIN].
+        if re.match(r'^\s*EXPORT\b', stripped, re.IGNORECASE):
+            name_token, name_col = _identifier_token_after_keyword(stripped, 'EXPORT')
+            if name_token:
+                if not re.match(rf'^{_IDENT}$', name_token):
+                    msg = f"Invalid identifier '{name_token}' — identifiers must start with a letter or underscore and contain only identifier characters."
+                    hint = "Identifiers cannot start with digits or contain '-'."
+                    issues.append(Issue(i, 'ERROR', msg, stripped, filename=filename, column=name_col, hint=hint, category='LEXER'))
+            strict_header = re.match(rf'^\s*EXPORT\s+({_IDENT})\s*\((.*?)\)\s*$', stripped, re.IGNORECASE)
+            if re.match(rf'^\s*EXPORT\s+({_IDENT})\s*\((.*?)\)\s*;\s*$', stripped, re.IGNORECASE):
+                issues.append(Issue(
+                    i,
+                    'ERROR',
+                    "Expected EXPORT header of form `EXPORT Name()` before `BEGIN`.",
+                    stripped,
+                    filename=filename,
+                    column=max(1, stripped.rfind(';') + 1),
+                    hint="Remove the semicolon after the EXPORT header.",
+                    category='PARSER',
+                ))
+            elif strict_header is None:
+                if re.match(rf'^\s*EXPORT\s+({_IDENT})\b(?!\s*\()', stripped, re.IGNORECASE):
+                    issues.append(Issue(
+                        i,
+                        'ERROR',
+                        "Expected EXPORT header of form `EXPORT Name()` before `BEGIN`.",
+                        stripped,
+                        filename=filename,
+                        column=max(1, stripped.upper().find('EXPORT') + 1),
+                        hint="Add parentheses after the program name, e.g. `EXPORT T()`.",
+                        category='PARSER',
+                    ))
+
+        if re.match(r'^\s*LOCAL\b', stripped, re.IGNORECASE) and not re.match(rf'^\s*LOCAL\s+{_IDENT}\s*\(', stripped, re.IGNORECASE):
+            ldecl = re.sub(r'^\s*LOCAL\b', '', stripped, flags=re.IGNORECASE)
+            ldecl = ldecl.split(':=')[0].rstrip(';').strip()
+            if re.search(r'([^\W\d]\w*)\s+([^\W\d]\w*)', ldecl):
+                issues.append(Issue(
+                    i,
+                    'ERROR',
+                    "Malformed LOCAL declaration list — expected comma-separated identifiers.",
+                    stripped,
+                    filename=filename,
+                    category='PARSER',
+                    hint="Use `LOCAL A, B, C;`.",
+                ))
+
     # ── Pass 1: collect defined function names + all assigned variable names ─
     defined_fns: Set[str] = set()
     duplicate_fns: Set[str] = set()
@@ -400,12 +508,12 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         line = _strip_comment(raw).strip()
 
         # Function declaration (handle bare declarations without EXPORT/PROCEDURE)
-        m = re.match(r'(?:EXPORT|PROCEDURE)\s+(\w+)(?:\s*\((.*?)\))?', line, re.IGNORECASE)
+        m = re.match(rf'(?:EXPORT|PROCEDURE)\s+({_IDENT})(?:\s*\((.*?)\))?', line, re.IGNORECASE)
         if not m:
             m = _match_key_header(line)
         # Check for bare function: Name(...) BEGIN
         if not m:
-            m_bare = re.match(r'^(\w+)\s*\((.*?)\)\s*$', line)
+            m_bare = re.match(rf'^({_IDENT})\s*\((.*?)\)\s*$', line)
             if m_bare:
                 if _begin_follows(proc_lines, i):
                     m = m_bare
@@ -468,7 +576,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
 
         # Track LOCAL variables
         m_local = re.match(r'^LOCAL\s+(.+?);?\s*$', line, re.IGNORECASE)
-        _is_local_fn = bool(re.match(r'^LOCAL\s+\w+\s*\(', line, re.IGNORECASE)) and ':=' not in line.split('(')[0]
+        _is_local_fn = bool(re.match(rf'^LOCAL\s+{_IDENT}\s*\(', line, re.IGNORECASE)) and ':=' not in line.split('(')[0]
         if m_local and not _is_local_fn:
             lhs_part = m_local.group(1).split(':=')[0]
             for m_var in re.finditer(r'\b([A-Za-z_]\w*)\b', lhs_part):
@@ -519,11 +627,11 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
     unreachable_depth:   int = -1
     unreachable_ln:      int = -1
 
-    def err(ln, msg, text=''):
-        issues.append(Issue(ln, 'ERROR',   msg, text))
+    def err(ln, msg, text='', col: int = 0, hint: str = '', category: str = 'SYNTAX'):
+        issues.append(Issue(ln, 'ERROR', msg, text, filename=filename, column=col, hint=hint, category=category))
 
-    def warn(ln, msg, text=''):
-        issues.append(Issue(ln, 'WARNING', msg, text))
+    def warn(ln, msg, text='', col: int = 0, hint: str = '', category: str = 'LINT'):
+        issues.append(Issue(ln, 'WARNING', msg, text, filename=filename, column=col, hint=hint, category=category))
 
     _warned_shadows:    Set[str] = set()
     _warned_zero_index: Set[str] = set()
@@ -643,6 +751,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
         stmts: List[str] = []
         tok_buf: List[str] = []
         in_string = False
+        nest_depth = 0
         j = 0
         while j < len(full_stmt):
             ch = full_stmt[j]
@@ -662,7 +771,15 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 # Backslash-escaped quote inside a string: \"
                 tok_buf.append('\\"')
                 j += 1
-            elif ch == ';' and not in_string:
+            elif ch in '([{':
+                if not in_string:
+                    nest_depth += 1
+                tok_buf.append(ch)
+            elif ch in ')]}':
+                if not in_string:
+                    nest_depth = max(0, nest_depth - 1)
+                tok_buf.append(ch)
+            elif ch == ';' and not in_string and nest_depth == 0:
                 # Semicolon terminates a statement
                 s = ''.join(tok_buf).strip()
                 if s:
@@ -704,12 +821,12 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                 'EXPORT', 'PROCEDURE',
             ])
             if not stmt.endswith(';'):
-                _m_fw = re.match(r'^([A-Za-z_]\w*)', bare_clean)
+                _m_fw = re.match(rf'^({_IDENT})', bare_clean)
                 _fw = _m_fw.group(1).upper() if _m_fw else ''
                 # LOCAL funcname(params) is a function header — no semicolon needed
                 _is_local_fn_hdr = (
                     _fw == 'LOCAL'
-                    and bool(re.match(r'^LOCAL\s+\w+\s*\(', bare_clean, re.IGNORECASE))
+                    and bool(re.match(rf'^LOCAL\s+{_IDENT}\s*\(', bare_clean, re.IGNORECASE))
                     and ':=' not in bare_clean
                 )
                 _is_bare_fn_hdr = False
@@ -720,7 +837,52 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     and not _is_local_fn_hdr
                     and not _is_bare_fn_hdr
                 ):
-                    warn(curr_ln, "Missing semicolon at end of statement.", display)
+                    err(
+                        curr_ln,
+                        "Missing semicolon at end of statement.",
+                        display,
+                        col=max(1, len(display.rstrip()) + 1),
+                        hint="Terminate statements with ';'.",
+                        category='PARSER',
+                    )
+
+            # Invalid top-level token gate: reject stray code outside any function/program.
+            if current_fn is None and not is_forward_declaration:
+                top_ok = bool(
+                    re.match(r'^(EXPORT|PROCEDURE)\b', bare_clean, re.IGNORECASE)
+                    or re.match(rf'^KEY\s+{_IDENT}\s*\(', bare_clean, re.IGNORECASE)
+                    or re.match(rf'^{_IDENT}\s*\(.*\)\s*$', bare_clean)
+                    or re.match(rf'^LOCAL\s+{_IDENT}\s*\(.*\)\s*$', bare_clean, re.IGNORECASE)
+                    or re.match(r'^LOCAL\s+.+', bare_clean, re.IGNORECASE)
+                    or re.match(rf'^EXPORT\s+{_IDENT}\s*:=', bare_clean, re.IGNORECASE)
+                    or re.match(rf'^{_IDENT}(?:\s*[\(\[].*[\)\]])?\s*:=', bare_clean)
+                    or re.match(r'^#pragma\b', bare_clean, re.IGNORECASE)
+                )
+                if not top_ok:
+                    err(
+                        curr_ln,
+                        "Invalid top-level token before/after program definition.",
+                        display,
+                        col=1,
+                        category='PARSER',
+                    )
+
+            # Identifier validation in declarations/headers.
+            for kw in ('EXPORT', 'PROCEDURE', 'LOCAL'):
+                token, tok_col = _identifier_token_after_keyword(bare_clean, kw)
+                if not token:
+                    continue
+                if kw == 'LOCAL' and not re.match(rf'^LOCAL\s+[^\s(;,]+\s*\(', bare_clean, re.IGNORECASE):
+                    # Variable declarations validated separately.
+                    continue
+                if not re.match(rf'^{_IDENT}$', token):
+                    err(
+                        curr_ln,
+                        f"Invalid identifier '{token}' — identifiers must start with a letter or underscore and cannot contain '-'.",
+                        display,
+                        col=tok_col,
+                        category='LEXER',
+                    )
 
             # ── Unreachable code check ────────────────────────────────────────────────────
             if unreachable_flag:
@@ -1116,6 +1278,15 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         is_global_decl = current_fn is None
                         if m_local:
                             lstr = m_local.group(1)
+                            ldecl = lstr.split(':=')[0].strip()
+                            if re.search(r'([^\W\d]\w*)\s+([^\W\d]\w*)', ldecl):
+                                err(
+                                    curr_ln,
+                                    "Malformed LOCAL declaration list — expected comma-separated identifiers.",
+                                    display,
+                                    hint="Use `LOCAL A, B, C;`.",
+                                    category='PARSER',
+                                )
                             if '[' in lstr or ']' in lstr:
                                 err(curr_ln, 'Syntax Error: Invalid array declaration "LOCAL name[size]".', display)
                             if '(' in lstr or ')' in lstr:
@@ -1161,6 +1332,19 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
             assignment_positions: List[int] = []
             if not re.match(r'^LOCAL\b', bare_clean, re.IGNORECASE):
                 assignment_positions = _find_top_level_assignment_ops(safe)
+                if (
+                    current_fn
+                    and re.match(rf'^\s*{_IDENT}(?:\s*[\(\[].*[\)\]])?\s*=(?!=)', safe)
+                    and ':=' not in safe
+                    and not re.match(r'^\s*(IF|WHILE|UNTIL|FOR)\b', safe, re.IGNORECASE)
+                ):
+                    err(
+                        curr_ln,
+                        "Invalid assignment operator '=' in statement context.",
+                        display,
+                        hint="Did you mean ':='?",
+                        category='PARSER',
+                    )
 
             for bracket_target in _find_square_bracket_indexing(display):
                 warn(
@@ -1196,7 +1380,23 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     # Track assignment to avoid "used before assigned"
                     var_match = re.match(rf'^({_IDENT})', target)
                     if var_match and current_fn:
-                        assigned_vars_in_fn.add(var_match.group(1).upper())
+                        assigned_name = var_match.group(1).upper()
+                        assigned_vars_in_fn.add(assigned_name)
+                        cf_up = current_fn.upper()
+                        curr_params = fn_params.get(cf_up, set())
+                        curr_locals = fn_locals.get(cf_up, set())
+                        if (
+                            assigned_name not in curr_params
+                            and assigned_name not in curr_locals
+                            and assigned_name not in _RESERVED_GLOBALS
+                        ):
+                            err(
+                                curr_ln,
+                                f"Undeclared variable '{var_match.group(1)}'.",
+                                display,
+                                hint=f"Declare it first with LOCAL {var_match.group(1)};",
+                                category='SEMANTIC',
+                            )
 
             # ── Usage / Call ──────────────────────────────────────────────────
             # Undeclared variable check & Local usage tracking & Uninitialized check
@@ -1230,10 +1430,7 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                         # Call check handled in Specific Function Call Analysis below
                         pass
                     else:
-                        # Potential implicit global or typo
-                        if tok not in curr_params and tok not in curr_locals and tok not in assigned_vars and tok not in defined_fns and tok not in BUILTIN_ARGS:
-                             # warn(curr_ln, f"Variable '{gs}' is used but not declared as LOCAL or parameter. Implicit globals are discouraged.", display)
-                             pass
+                        pass
 
             # ── Color Literal Validation ──────────────────────────────────────
             # The emulator accepts #RRGGBB directly, but hardware guidance lives
@@ -1271,6 +1468,13 @@ def lint(ppl_code: str, filename: str = '<unknown>') -> List[Issue]:
                     k += 1
                 args_str = "".join([str(c) for c in arg_buf]) # pyre-ignore
                 count = _count_args(args_str)
+                if args_str.strip().endswith(','):
+                    err(
+                        curr_ln,
+                        "Trailing comma in argument list.",
+                        display,
+                        category='PARSER',
+                    )
 
                 # Lowercase PPL keyword used instead of uppercase
                 if fg != func_name and func_name in BUILTIN_ARGS and attr_owner is None:

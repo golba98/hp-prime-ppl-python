@@ -186,8 +186,19 @@ def _show_issue(filename: str, lines: list, issue) -> None:
 
     # Path:     --> path/to/file:12
     short_path = os.path.relpath(filename) if os.path.exists(filename) else filename
-    loc_info = f'{short_path}:{ln}' if ln > 0 else short_path
+    issue_file = getattr(issue, 'filename', '') or filename
+    short_path = os.path.relpath(issue_file) if issue_file and os.path.exists(issue_file) else issue_file or short_path
+    col = getattr(issue, 'column', 0) or 0
+    if ln > 0 and col > 0:
+        loc_info = f'{short_path}:{ln}:{col}'
+    elif ln > 0:
+        loc_info = f'{short_path}:{ln}'
+    else:
+        loc_info = short_path
     print(f'     {_CLR_BLU}-->{_CLR_RST} {_CLR_GRY}{loc_info}{_CLR_RST}')
+    hint = getattr(issue, 'hint', '')
+    if hint:
+        print(f'     {_CLR_CYN}hint:{_CLR_RST} {hint}')
 
     # Source snippet removed as per request ("remove the line results")
     pass
@@ -359,16 +370,16 @@ Examples:
             print(f'  {_CLR_GRY}Hint: PPL files should contain EXPORT functions with BEGIN/END blocks and := assignments.{_CLR_RST}')
             sys.exit(1)
 
-    # ── Stage 1: Lint ────────────────────────────────────────────
-    if not args.no_lint:
-        issues = lint(ppl_code, filename=filename)
-        errors  = [x for x in issues if x.severity == 'ERROR']
+    # ── Stage 1: Front-end validation (always required) ──────────
+    issues = lint(ppl_code, filename=filename)
+    errors = [x for x in issues if x.severity == 'ERROR']
+    report_issues = errors if args.no_lint else issues
 
-        # Always show report so user knows it's OK
-        _show_lint_report(filename, ppl_code, issues)
+    # Always print diagnostics when present.
+    _show_lint_report(filename, ppl_code, report_issues)
 
-        if errors:
-            sys.exit(1)   # stop here — don't run broken code
+    if errors:
+        sys.exit(1)   # stop here — don't transpile or execute invalid PPL
 
     # ── Stage 2: Transpile ───────────────────────────────────────
     # Resolve output path relative to the current working directory.

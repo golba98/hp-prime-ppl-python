@@ -95,7 +95,7 @@ ppl tester.hpprgm --args "50"
 | `--output <path>` | Save screen render to a custom PNG (default: `screen.png`) |
 | `--save` | Force PNG save even when the live pygame window is open |
 | `--code "PPL…"` | Run inline PPL code without a file |
-| `--no-lint` | Skip linting, transpile and run directly |
+| `--no-lint` | Suppress warnings-only lint output (syntax/semantic errors still block compile) |
 | `--input <val>` | Queue a value for the next `INPUT()` call (repeatable) |
 
 Examples:
@@ -135,6 +135,20 @@ Run a specific test:
 ```powershell
 pytest tests/test_compiler.py -v -k "test_for_loop"
 ```
+
+Front-end validation regression suite (invalid PPL must fail before transpile/execute):
+
+```powershell
+py -m pytest tests/test_frontend_regressions.py -v
+```
+
+Quick manual invalid-source check:
+
+```powershell
+py -m src.ppl_emulator.cli --code "EXPORT 2TEST() BEGIN PRINT(1); END;" --dump-python
+```
+
+Expected result: compile failure with a front-end diagnostic (and no successful run).
 
 ---
 
