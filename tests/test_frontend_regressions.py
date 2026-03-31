@@ -138,6 +138,20 @@ END;
     assert "(TIME)" in combined_output.upper()
 
 
+def test_cli_can_disable_runtime_time_budget():
+    code = """
+EXPORT T()
+BEGIN
+  WAIT(0.05);
+  PRINT("OK");
+END;
+"""
+    cli = _run_cli(code, extra_args=["--max-elapsed-seconds", "0.01", "--no-time-limit"], timeout=30)
+    assert cli.returncode == 0
+    combined_output = f"{cli.stdout}\n{cli.stderr}"
+    assert "OK" in combined_output
+
+
 def test_direct_recursion_emits_warning():
     code = """
 EXPORT T()
